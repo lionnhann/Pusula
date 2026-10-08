@@ -27,6 +27,33 @@ const REQUIRE_VERIFY = process.env.REQUIRE_VERIFY ? process.env.REQUIRE_VERIFY =
 const TRUST_PROXY = process.env.TRUST_PROXY !== "0";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+// ---- Kalıcılık: kalıcı diski olmayan (ücretsiz) barındırıcılar için şifreli yedek ----
+// BACKUP_GH_TOKEN + BACKUP_GH_REPO + BACKUP_KEY doluysa veritabanı AES-256-GCM ile şifrelenip özel bir GitHub deposuna yedeklenir;
+// sunucu yeniden başlayıp dosya yoksa oradan geri yüklenir.
+const BK = { token: process.env.BACKUP_GH_TOKEN || "", repo: process.env.BACKUP_GH_REPO || "", key: process.env.BACKUP_KEY || "", file: process.env.BACKUP_GH_PATH || "pusula.db.enc", api: (process.env.BACKUP_GH_API || "https://api.github.com").replace(/\/+$/, "") };
+const BK_ON = !!(BK.token && BK.repo && BK.key);
+let BK_SAFE = true; // geri yükleme doğrulanmadan yedek yükleme yapılmaz: boş veritabanı iyi yedeğin üstüne yazmasın
+const BK_RESTORE_JS = `
+const fs=require("fs"),crypto=require("crypto");
+const E=process.env,url=(E.BACKUP_GH_API||"https://api.github.com").replace(/\\/+$/,"")+"/repos/"+E.BACKUP_GH_REPO+"/contents/"+encodeURI(E.BACKUP_GH_PATH||"pusula.db.enc");
+(async()=>{
+ const r=await fetch(url,{headers:{Authorization:"Bearer "+E.BACKUP_GH_TOKEN,Accept:"application/vnd.github.raw+json","User-Agent":"pusula"}});
+ if(r.status===404)process.exit(3);
+ if(!r.ok){console.error("yedek indirilemedi: HTTP "+r.status);process.exit(4)}
+ const b=Buffer.from(await r.arrayBuffer());
+ if(b.length<33||b.subarray(0,4).toString()!=="PSB1"){console.error("yedek biçimi tanınmadı");process.exit(5)}
+ const k=crypto.scryptSync(E.BACKUP_KEY,"pusula-backup-v1",32),d=crypto.createDecipheriv("aes-256-gcm",k,b.subarray(4,16));d.setAuthTag(b.subarray(16,32));
+ fs.writeFileSync(E.DB_PATH_OUT,Buffer.concat([d.update(b.subarray(32)),d.final()]));
+})().catch(e=>{console.error("yedek hatası (anahtar yanlış olabilir): "+e.message);process.exit(4)});`;
+if (BK_ON && !fs.existsSync(DB_PATH)) {
+  try {
+    require("child_process").execFileSync(process.execPath, ["-e", BK_RESTORE_JS], { env: { ...process.env, DB_PATH_OUT: DB_PATH }, stdio: ["ignore", "inherit", "inherit"], timeout: 60000 });
+    console.log("Veritabanı yedekten geri yüklendi.");
+  } catch (e) {
+    if (e && e.status === 3) console.log("Yedek bulunamadı; boş veritabanıyla başlanıyor.");
+    else { BK_SAFE = false; console.error("!!! YEDEK GERİ YÜKLENEMEDİ (kod " + (e && e.status) + "). Mevcut yedeğin üstüne yazmamak için yedek yükleme KAPALI. Ayarları kontrol edip yeniden başlat."); }
+  }
+}
 const db = new DatabaseSync(DB_PATH);
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
 db.exec(`
@@ -158,7 +185,7 @@ const server = http.createServer(async (req, res) => {
 // ---- Yerleşik yapay zekâ: anahtar yalnızca sunucuda durur, kullanıcıdan anahtar istenmez ----
 const AI_KEYS = String(process.env.AI_KEY || "").split(",").map(x => x.trim()).filter(Boolean), AI_KEY = AI_KEYS[0] || "", AI_PROVIDER = (process.env.AI_PROVIDER || "gemini").toLowerCase();
 let aiRR = 0;
-const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === "gemini" ? "gemini-2.5-flash" : "gpt-4o-mini");
+const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === "gemini" ? "gemini-3.8-flash" : "gpt-4o-mini");
 const AI_URL = (process.env.AI_URL || (AI_PROVIDER === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : "https://api.openai.com/v1")).replace(/\/+$/, "");
 const AI_DAILY = +process.env.AI_DAILY_LIMIT || 40, AI_DAILY_PRO = +process.env.AI_DAILY_LIMIT_PRO || 200, AI_MAX_IN = 200000;
 db.exec("CREATE TABLE IF NOT EXISTS ai_usage(user_id TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, day))");
@@ -341,7 +368,7 @@ app.post("/api/ai", auth, async (req, res) => {
   db.prepare("DELETE FROM ai_usage WHERE day<?").run(new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10));
   const ac = new AbortController(), to = setTimeout(() => ac.abort(), 90000);
   try {
-    let text = "", trunc = false, lastSt = 0;
+    let text = "", trunc = false, lastSt = 0, lastMsg = "";
     const start = aiRR++ % AI_KEYS.length;
     for (let k = 0; k < AI_KEYS.length; k++) {
       const key = AI_KEYS[(start + k) % AI_KEYS.length]; let r, j;
@@ -352,7 +379,7 @@ app.post("/api/ai", auth, async (req, res) => {
         r = await fetch(AI_URL + "/chat/completions", { method: "POST", signal: ac.signal, headers: { "content-type": "application/json", authorization: "Bearer " + key }, body: JSON.stringify({ model: AI_MODEL, messages: turns }) });
       }
       j = await r.json().catch(() => ({}));
-      if (!r.ok) { lastSt = r.status; console.error("ai:", r.status, JSON.stringify(j).slice(0, 300)); if (r.status === 429 || r.status >= 500 || r.status === 401 || r.status === 403) continue; return res.status(502).json({ error: "ai_failed" }); }
+      if (!r.ok) { lastSt = r.status; lastMsg = String((j.error && (j.error.message || j.error.status)) || "").replace(/AIza[\w-]+/g, "***").slice(0, 160); console.error("ai:", r.status, JSON.stringify(j).slice(0, 300)); if (r.status === 429 || r.status >= 500 || r.status === 401 || r.status === 403) continue; return res.status(502).json({ error: "ai_failed " + r.status + ": " + lastMsg }); }
       if (AI_PROVIDER === "gemini") {
         const c = (j.candidates || [])[0];
         if ((j.promptFeedback && j.promptFeedback.blockReason) || (c && c.finishReason === "SAFETY")) return res.json({ refused: true });
@@ -363,10 +390,10 @@ app.post("/api/ai", auth, async (req, res) => {
       }
       break;
     }
-    if (!text && lastSt) return res.status(502).json({ error: lastSt === 429 ? "ai_busy" : "ai_failed" });
+    if (!text && lastSt) return res.status(502).json({ error: (lastSt === 429 ? "ai_busy " : "ai_failed ") + lastSt + ": " + lastMsg });
     if (!text) return res.status(502).json({ error: "ai_empty" });
     res.json({ text, truncated: trunc, left: Math.max(0, max - used - 1) });
-  } catch (e) { console.error("ai:", e.message); res.status(502).json({ error: "ai_failed" }); }
+  } catch (e) { console.error("ai:", e.message); res.status(502).json({ error: "ai_failed: " + String(e.message).slice(0, 80) }); }
   finally { clearTimeout(to); }
 });
 
@@ -411,7 +438,35 @@ function serveStatic(req, res, pathname) {
   fs.createReadStream(f).pipe(res);
 }
 
+let bkLast = -1, bkBusy = false;
+async function bkRun(force) {
+  if (!BK_ON || !BK_SAFE || bkBusy) return;
+  const n = db.prepare("SELECT total_changes() AS n").get().n;
+  if (!force && n === bkLast) return;
+  bkBusy = true;
+  try {
+    const tmp = DB_PATH + ".bk"; try { fs.unlinkSync(tmp); } catch (e) {}
+    db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'");
+    const plain = fs.readFileSync(tmp); try { fs.unlinkSync(tmp); } catch (e) {}
+    const iv = crypto.randomBytes(12), c = crypto.createCipheriv("aes-256-gcm", crypto.scryptSync(BK.key, "pusula-backup-v1", 32), iv), ct = Buffer.concat([c.update(plain), c.final()]);
+    const blob = Buffer.concat([Buffer.from("PSB1"), iv, c.getAuthTag(), ct]).toString("base64");
+    const url = BK.api + "/repos/" + BK.repo + "/contents/" + encodeURI(BK.file), H = { Authorization: "Bearer " + BK.token, Accept: "application/vnd.github+json", "User-Agent": "pusula", "content-type": "application/json" };
+    for (let tries = 0; tries < 2; tries++) {
+      let sha; const g = await fetch(url, { headers: H });
+      if (g.ok) sha = (await g.json()).sha; else if (g.status !== 404) throw new Error("GitHub HTTP " + g.status);
+      const r = await fetch(url, { method: "PUT", headers: H, body: JSON.stringify({ message: "yedek " + new Date().toISOString(), content: blob, ...(sha ? { sha } : {}) }) });
+      if (r.ok) { bkLast = n; break; }
+      if (r.status !== 409 && r.status !== 422) throw new Error("yükleme HTTP " + r.status);
+    }
+  } catch (e) { console.error("yedek:", e.message); }
+  finally { bkBusy = false; }
+}
+
 if (require.main === module) {
+  if (BK_ON) {
+    setInterval(() => bkRun(false), +process.env.BACKUP_INTERVAL_MS || 60000);
+    process.on("SIGTERM", async () => { for (let i = 0; i < 50 && bkBusy; i++) await new Promise(r => setTimeout(r, 200)); await bkRun(true); process.exit(0); });
+  }
   server.listen(PORT, () => console.log(`Pusula sunucusu :${PORT} · e-posta: ${HAS_MAIL ? "açık" : "kapalı (kodlar günlüğe yazılır)"} · doğrulama: ${REQUIRE_VERIFY ? "açık" : "kapalı"}`));
 }
 module.exports = { server, db };
