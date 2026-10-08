@@ -1,0 +1,5 @@
+# alanadin.com yerine kendi alan adını yaz (DNS A kaydı sunucunun IP'sine işaret etmeli). HTTPS otomatik alınır.
+alanadin.com {
+	encode gzip
+	reverse_proxy pusula:3000
+}

@@ -1,0 +1,14 @@
+{
+  "name": "pusula-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pusula için hesap (kayıt/giriş/parola sıfırlama) ve veri senkronu sunucusu. Hiç bağımlılık yok.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js && node test_billing.js && node test_ai.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
