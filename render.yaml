@@ -1,0 +1,27 @@
+# ÜCRETSİZ DENEME sürümü. Bunu render.yaml adıyla kaydet. Kalıcı veri YOK.
+# Render "Blueprint": depoyu GitHub'a yükle → Render'da New → Blueprint → bu depoyu seç.
+services:
+  - type: web
+    name: pusula
+    runtime: docker
+    plan: free             # ÜCRETSİZ ama DENEME İÇİN: disk yok, uyur; hesaplar yeniden başlatmada silinir
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_PATH
+        value: /tmp/pusula.db
+      - key: TRUST_PROXY
+        value: "1"
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: AI_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: LS_CHECKOUT_URL
+        sync: false
+      - key: LS_WEBHOOK_SECRET
+        sync: false
+      - key: PRO_PRICE_LABEL
+        sync: false
