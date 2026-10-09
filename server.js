@@ -494,7 +494,7 @@ function sigV4Presign({ method, host, pathName, keyId, secret, region, service, 
   const kd = hmac(hmac(hmac(hmac("AWS4" + secret, day), region), service), "aws4_request");
   return { query: cq + "&X-Amz-Signature=" + hmac(kd, sts).toString("hex"), signature: hmac(kd, sts).toString("hex") };
 }
-const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/webm": "weba", "audio/mp4": "m4a", "audio/ogg": "ogg", "application/octet-stream": "enc" };
+const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/webm": "weba", "audio/mp4": "m4a", "audio/ogg": "ogg", "audio/mpeg": "mp3", "application/octet-stream": "enc" };
 const MAX_IMG = 4 * 1024 * 1024, MAX_VID = +process.env.MAX_VIDEO_BYTES || 150 * 1024 * 1024;
 // Görseller varsayılan olarak kendi sunucumuzdan sunulur (bazı operatörler r2.dev adresine SSL ile bağlanmayı engelliyor). MEDIA_PROXY=0 ile doğrudan R2 adresi kullanılır.
 const MEDIA_PROXY = process.env.MEDIA_PROXY !== "0";
@@ -529,9 +529,10 @@ function postRows(rows, me) {
   const vw = Object.fromEntries(db.prepare(`SELECT post_id, COUNT(*) n FROM reel_views WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids).map(r => [r.post_id, r.n]));
   const cids = [...new Set(rows.map(r => r.community).filter(Boolean))], cmap = {};
   if (cids.length) for (const c of db.prepare(`SELECT id, handle, name FROM communities WHERE id IN (${cids.map(() => "?").join(",")})`).all(...cids)) cmap[c.id] = { handle: c.handle, name: c.name };
-  return rows.map(r => ({ images: r.kind === "photo" && parseMore(r.more).length ? [r.media, ...parseMore(r.more)].map(mediaUrl) : undefined, edited: undefined, community: r.community && cmap[r.community] ? cmap[r.community] : null, views: vw[r.id] || 0, poster: r.poster ? mediaUrl(r.poster) : "", saved: sv.has(r.id), id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), likes: lk[r.id] || 0, comments: cm[r.id] || 0, liked: mine.has(r.id), own: r.user_id === me }));
+  const _sn = new Map(); const snd = id => { if (!id) return null; if (!_sn.has(id)) _sn.set(id, soundInfo(id)); return _sn.get(id); };
+  return rows.map(r => ({ sound: snd(r.sound), place: r.place || "", images: r.kind === "photo" && parseMore(r.more).length ? [r.media, ...parseMore(r.more)].map(mediaUrl) : undefined, edited: undefined, community: r.community && cmap[r.community] ? cmap[r.community] : null, views: vw[r.id] || 0, poster: r.poster ? mediaUrl(r.poster) : "", saved: sv.has(r.id), id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), likes: lk[r.id] || 0, comments: cm[r.id] || 0, liked: mine.has(r.id), own: r.user_id === me }));
 }
-const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.more, p.community, p.created, f.handle, f.avatar FROM posts p JOIN profiles f ON f.user_id=p.user_id";
+const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.more, p.place, p.sound, p.community, p.created, f.handle, f.avatar FROM posts p JOIN profiles f ON f.user_id=p.user_id";
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id)";
 
@@ -593,8 +594,10 @@ S("post", needProf, (req, res) => {
   let poster = String(b.poster || "");
   if (poster && (kind !== "reel" || !poster.startsWith("m/" + req.user.id + "/") || !/\.(jpg|png|webp)$/.test(poster) || poster.length > 120)) poster = "";
   const mv = moreOk(req.user.id, kind, b.more); if (mv.error) return res.status(400).json({ error: mv.error });
+  const place = cleanPlace(b.place), snd = kind === "text" ? "" : soundOk(b.sound);
+  if (b.sound && !snd && kind !== "text") return res.status(400).json({ error: "bad_sound" });
   const id = "p" + rnd(8);
-  db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,more,community,created) VALUES(?,?,?,?,?,?,?,?,?)").run(id, req.user.id, kind, text, kind === "text" ? "" : media, kind === "reel" ? poster : "", mv.json, cid, now());
+  db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,more,community,created,place,pkey,sound) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(id, req.user.id, kind, text, kind === "text" ? "" : media, kind === "reel" ? poster : "", mv.json, cid, now(), place, nrm(place), snd); if (snd) soundUse(snd);
   afterPost(id, req.user.id, text);
   res.json({ ok: true, id });
 });
@@ -707,7 +710,7 @@ S("block", needProf, (req, res) => {
 });
 S("report", needProf, (req, res) => {
   if (!limit("srep:" + req.user.id, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
-  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community", "listing"].includes(b.kind) ? b.kind : "";
+  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community", "listing", "sound"].includes(b.kind) ? b.kind : "";
   if (!kind) return res.status(400).json({ error: "bad_kind" });
   db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created,evidence) VALUES(?,?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now(), kind === "msg" ? cleanText(b.evidence, 2000) : "");
   res.json({ ok: true });
@@ -766,6 +769,7 @@ app.post("/api/admin/reports", (req, res) => {
       else if (r.kind === "comment") { const p = db.prepare("SELECT user_id, text FROM comments WHERE id=?").get(r.target); if (p) { o.preview = p.text; o.target_handle = hOf(p.user_id); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "user") { o.target_handle = r.target; }
       else if (r.kind === "listing") { const l = db.prepare("SELECT title, about, price, currency, user_id, image FROM listings WHERE id=?").get(r.target); if (l) { o.preview = l.title + " — " + (l.price >= 0 ? l.price + " " + l.currency : "fiyat sorulur") + "\n" + l.about; o.target_handle = hOf(l.user_id); o.media = mediaUrl(l.image); } else o.preview = "(silinmiş)"; }
+      else if (r.kind === "sound") { const x = db.prepare("SELECT title, user_id FROM sounds WHERE id=?").get(r.target); if (x) { o.preview = "🎵 " + x.title; o.target_handle = hOf(x.user_id); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "community") { const c = db.prepare("SELECT name, about, rules, owner FROM communities WHERE handle=?").get(r.target); if (c) { o.preview = c.name + " — " + c.about + (c.rules ? "\nKurallar: " + c.rules : ""); o.target_handle = hOf(c.owner); } else o.preview = "(silinmiş)"; }
     } catch (e) { /* önizleme isteğe bağlı */ }
     return o;
@@ -795,6 +799,7 @@ app.post("/api/admin/remove", (req, res) => {
   if (b.post) { const pm = db.prepare("SELECT media, poster, more FROM posts WHERE id=?").get(String(b.post)); db.prepare("DELETE FROM posts WHERE id=?").run(String(b.post)); if (pm) delPostMedia(pm); }
   if (b.story) { const sm = db.prepare("SELECT media FROM stories WHERE id=?").get(String(b.story)); db.prepare("DELETE FROM stories WHERE id=?").run(String(b.story)); if (sm && sm.media) r2Free(sm.media); }
   if (b.community) deleteCommunity(String(b.community).toLowerCase());
+  if (b.sound) soundRemove(String(b.sound));
   if (b.listing) { const lm = db.prepare("SELECT image FROM listings WHERE id=?").get(String(b.listing)); db.prepare("DELETE FROM listings WHERE id=?").run(String(b.listing)); if (lm && lm.image) r2Del(lm.image); }
   if (b.comment) db.prepare("DELETE FROM comments WHERE id=?").run(String(b.comment));
   if (b.msg) { const m = /^d:(\d{1,12})$/.exec(String(b.msg)), g = /^g:([A-Za-z0-9]{1,20}):(\d{1,12})$/.exec(String(b.msg)); let mm = null;
@@ -884,12 +889,12 @@ S("story_new", needProf, (req, res) => {
   }
   const id = "s" + rnd(8), t = now(), closeF = b.close ? 1 : 0;
   let poll = ""; if (b.poll && typeof b.poll === "object") { const pa = cleanText(b.poll.a, 24).replace(/\n/g, " "), pb = cleanText(b.poll.b, 24).replace(/\n/g, " "); if (pa && pb) poll = JSON.stringify({ a: pa, b: pb }); else return res.status(400).json({ error: "bad_poll" }); }
-  db.prepare("INSERT INTO stories(id,user_id,kind,text,media,bg,created,expires,poll,close) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, me, kind, text, kind === "text" ? "" : media, Math.min(7, Math.max(0, Math.floor(+b.bg || 0))), t, t + STORY_MS, poll, closeF);
+  db.prepare("INSERT INTO stories(id,user_id,kind,text,media,bg,created,expires,poll,close,sound) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id, me, kind, text, kind === "text" ? "" : media, Math.min(7, Math.max(0, Math.floor(+b.bg || 0))), t, t + STORY_MS, poll, closeF, kind === "video" ? "" : soundOk(b.sound)); if (kind !== "video" && soundOk(b.sound)) soundUse(b.sound);
   res.json({ ok: true, id });
 });
 S("stories", needProf, (req, res) => {
   purge(); const me = req.user.id;
-  const rows = db.prepare(`SELECT s.id, s.user_id, s.kind, s.text, s.media, s.bg, s.created, s.poll, s.close, f.handle, f.avatar FROM stories s JOIN profiles f ON f.user_id=s.user_id
+  const rows = db.prepare(`SELECT s.id, s.user_id, s.kind, s.text, s.media, s.bg, s.created, s.poll, s.close, s.sound, f.handle, f.avatar FROM stories s JOIN profiles f ON f.user_id=s.user_id
     WHERE s.expires>? AND (s.user_id=? OR s.user_id IN (SELECT followee FROM follows WHERE follower=?))
     AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=s.user_id) OR (b.blocker=s.user_id AND b.blocked=?))
     AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=s.user_id) AND (s.close=0 OR s.user_id=? OR EXISTS(SELECT 1 FROM close_friends cf WHERE cf.user_id=s.user_id AND cf.friend_id=?)) ORDER BY s.created`).all(now(), me, me, me, me, me, me);
@@ -897,7 +902,7 @@ S("stories", needProf, (req, res) => {
   const g = new Map();
   for (const r of rows) {
     const o = g.get(r.user_id) || { handle: r.handle, avatar: mediaUrl(r.avatar), own: r.user_id === me, items: [], last: 0 };
-    o.items.push({ id: r.id, close: !!r.close, kind: r.kind, text: r.text, media: mediaUrl(r.media), bg: r.bg, created: r.created, seen: seen.has(r.id) || r.user_id === me, poll: pollOf(r, me) }); o.last = r.created; g.set(r.user_id, o);
+    o.items.push({ id: r.id, sound: r.sound ? soundInfo(r.sound) : null, close: !!r.close, kind: r.kind, text: r.text, media: mediaUrl(r.media), bg: r.bg, created: r.created, seen: seen.has(r.id) || r.user_id === me, poll: pollOf(r, me) }); o.last = r.created; g.set(r.user_id, o);
   }
   const out = [...g.values()].map(o => Object.assign(o, { seen: o.items.every(i => i.seen) }));
   out.sort((a, b) => (b.own - a.own) || (a.seen - b.seen) || (b.last - a.last));
@@ -1167,12 +1172,12 @@ S("save", needProf, (req, res) => {
   const me = req.user.id, id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id);
   if (!p || !visible(me, p.user_id) || !canSee(me, p.user_id)) return res.status(404).json({ error: "not_found" });
   if (!limit("ssave:" + me, 300, 3600e3)) return res.status(429).json({ error: "rate_limited" });
-  if ((req.body || {}).on) db.prepare("INSERT OR IGNORE INTO saves(user_id,post_id,created) VALUES(?,?,?)").run(me, id, now()); else db.prepare("DELETE FROM saves WHERE user_id=? AND post_id=?").run(me, id);
+  if ((req.body || {}).on) { db.prepare("INSERT OR IGNORE INTO saves(user_id,post_id,created) VALUES(?,?,?)").run(me, id, now()); const cl = String((req.body || {}).coll || ""); if (cl && db.prepare("SELECT 1 FROM collections WHERE id=? AND user_id=?").get(cl, me)) db.prepare("UPDATE saves SET coll=? WHERE user_id=? AND post_id=?").run(cl, me, id); } else db.prepare("DELETE FROM saves WHERE user_id=? AND post_id=?").run(me, id);
   res.json({ ok: true, saved: !!(req.body || {}).on });
 });
 S("saved", needProf, (req, res) => {
-  const me = req.user.id;
-  const rows = db.prepare(`${POST_SEL} JOIN saves sv ON sv.post_id=p.id AND sv.user_id=? WHERE 1=1 ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY sv.created DESC LIMIT 50`).all(me, me, me);
+  const me = req.user.id, cl = String((req.body || {}).coll || "");
+  const rows = db.prepare(`${POST_SEL} JOIN saves sv ON sv.post_id=p.id AND sv.user_id=? WHERE 1=1 ${cl ? "AND sv.coll=?" : ""} ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY sv.created DESC LIMIT 50`).all(...(cl ? [me, cl, me, me] : [me, me, me]));
   res.json({ posts: postRows(rows, me) });
 });
 S("msg_delete", needProf, (req, res) => {
@@ -1195,6 +1200,7 @@ function purgeUserMedia(uid) {
   for (const q of ["SELECT image media FROM listings WHERE user_id=?", "SELECT media FROM scheduled WHERE user_id=?", "SELECT poster media FROM scheduled WHERE user_id=?", "SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
     for (const r of db.prepare(q).all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT media FROM msgs WHERE from_id=? OR to_id=?").all(uid, uid)) if (r.media) keys.add(r.media);
+  for (const r of db.prepare("SELECT media FROM sounds WHERE user_id=?").all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT i.media FROM highlight_items i JOIN highlights h ON h.id=i.hid WHERE h.user_id=?").all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT more FROM posts WHERE user_id=? AND more<>''").all(uid)) for (const k of parseMore(r.more)) keys.add(k);
   for (const r of db.prepare("SELECT more FROM scheduled WHERE user_id=? AND more<>''").all(uid)) for (const k of parseMore(r.more)) keys.add(k);
@@ -1369,7 +1375,7 @@ function schedTick() {
       const v = hasProf && !isBanned(r.user_id) ? checkPostInput(r.user_id, { kind: r.kind, text: r.text, media: r.media, poster: r.poster, more: parseMore(r.more), community: com ? com.handle : (r.community ? "-" : "") }) : { error: "x" };
       if (v.error) { delPostMedia(r); continue; }
       const id = "p" + rnd(8);
-      db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,more,community,created) VALUES(?,?,?,?,?,?,?,?,?)").run(id, r.user_id, v.kind, v.text, v.media, v.poster, v.more, v.cid, now());
+      db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,more,community,created,place,pkey,sound) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(id, r.user_id, v.kind, v.text, v.media, v.poster, v.more, v.cid, now(), r.place || "", nrm(r.place || ""), v.kind === "text" ? "" : soundOk(r.sound)); if (v.kind !== "text" && soundOk(r.sound)) soundUse(r.sound);
       afterPost(id, r.user_id, v.text);
     } catch (e) { console.error("sched:", e.message); }
   }
@@ -1382,7 +1388,7 @@ S("sched_new", needProf, (req, res) => {
   if (db.prepare("SELECT COUNT(*) n FROM scheduled WHERE user_id=?").get(me).n >= 20) return res.status(400).json({ error: "too_many_scheduled" });
   const v = checkPostInput(me, b); if (v.error) return res.status(v.status).json({ error: v.error });
   const id = "s" + rnd(8);
-  db.prepare("INSERT INTO scheduled(id,user_id,kind,text,media,poster,more,community,at,created) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, me, v.kind, v.text, v.media, v.poster, v.more, v.cid, at, now());
+  db.prepare("INSERT INTO scheduled(id,user_id,kind,text,media,poster,more,community,at,created,place,sound) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(id, me, v.kind, v.text, v.media, v.poster, v.more, v.cid, at, now(), cleanPlace(b.place), v.kind === "text" ? "" : soundOk(b.sound));
   res.json({ ok: true, id, at });
 });
 S("sched_list", needProf, (req, res) => {
@@ -1430,6 +1436,7 @@ CREATE TABLE IF NOT EXISTS listings(id TEXT PRIMARY KEY, user_id TEXT NOT NULL R
 CREATE INDEX IF NOT EXISTS listings_u ON listings(user_id, created DESC);
 CREATE INDEX IF NOT EXISTS listings_c ON listings(status, category, created DESC);
 `);
+const cleanPlace = v => cleanText(v, 40).replace(/\n/g, " ").trim();
 const nrm = t => String(t || "").toLocaleLowerCase("tr").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i");
 const SHOP_CATS = ["Moda", "Elektronik", "Ev ve yaşam", "Yiyecek", "Güzellik", "Eğitim", "Yazılım ve tasarım", "Hizmet", "El işi", "Diğer"], SHOP_CUR = ["TRY", "USD", "EUR"];
 const LST_SEL = "SELECT l.*, f.handle, f.avatar FROM listings l JOIN profiles f ON f.user_id=l.user_id";
@@ -1510,6 +1517,7 @@ S("post_edit", needProf, (req, res) => {
   if (!limit("sedit:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
   const text = cleanText(b.text, 1000); if (p.kind === "text" && !text) return res.status(400).json({ error: "empty" });
   db.prepare("UPDATE posts SET text=? WHERE id=?").run(text, id);
+  if (b.place !== undefined) { const pl = cleanPlace(b.place); db.prepare("UPDATE posts SET place=?, pkey=? WHERE id=?").run(pl, nrm(pl), id); }
   db.prepare("DELETE FROM tags WHERE post_id=?").run(id);
   for (const t of tagsOf(text)) db.prepare("INSERT OR IGNORE INTO tags(post_id,tag,created) VALUES(?,?,?)").run(id, t, now());
   res.json({ ok: true, text });
@@ -1618,6 +1626,116 @@ S("comment_pin", needProf, (req, res) => {
 });
 // ===== END INSTA =====
 
+// ===== BEGIN PACK2 =====
+try { db.exec("ALTER TABLE posts ADD COLUMN place TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE posts ADD COLUMN pkey TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE scheduled ADD COLUMN place TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE saves ADD COLUMN coll TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+try { db.exec("CREATE INDEX IF NOT EXISTS posts_pkey ON posts(pkey, created)"); } catch (e) { /* var */ }
+db.exec(`
+CREATE TABLE IF NOT EXISTS collections(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS notes(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created INTEGER NOT NULL);
+`);
+
+// Konum etiketi: bu gönderileri listele
+S("place", needProf, (req, res) => {
+  const me = req.user.id, key = nrm(cleanPlace((req.body || {}).place)), before = +(req.body || {}).before || now() + 1;
+  if (!key) return res.status(400).json({ error: "bad_place" });
+  const rows = db.prepare(`${POST_SEL} WHERE p.pkey=? AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(key, before, me, me);
+  const pr = postRows(rows, me);
+  res.json({ place: pr.length ? pr[0].place : cleanPlace((req.body || {}).place), posts: pr });
+});
+S("places", needProf, (req, res) => {
+  const rows = db.prepare("SELECT place, COUNT(*) n FROM posts WHERE pkey<>'' AND community='' AND created>? GROUP BY pkey ORDER BY n DESC, MAX(created) DESC LIMIT 8").all(now() - 30 * 864e5);
+  res.json({ places: rows.map(r => ({ place: r.place, n: r.n })) });
+});
+
+// Kaydedilenler: koleksiyonlar
+S("coll_list", needProf, (req, res) => {
+  const me = req.user.id, rows = db.prepare("SELECT c.id, c.name, (SELECT COUNT(*) FROM saves s WHERE s.user_id=c.user_id AND s.coll=c.id) n FROM collections c WHERE c.user_id=? ORDER BY c.created").all(me);
+  res.json({ collections: rows, total: db.prepare("SELECT COUNT(*) n FROM saves WHERE user_id=?").get(me).n });
+});
+S("coll_new", needProf, (req, res) => {
+  const me = req.user.id, name = cleanText((req.body || {}).name, 24).replace(/\n/g, " ");
+  if (!name) return res.status(400).json({ error: "empty" });
+  if (db.prepare("SELECT COUNT(*) n FROM collections WHERE user_id=?").get(me).n >= 20) return res.status(400).json({ error: "too_many" });
+  const id = "k" + rnd(8); db.prepare("INSERT INTO collections(id,user_id,name,created) VALUES(?,?,?,?)").run(id, me, name, now());
+  res.json({ ok: true, id });
+});
+S("coll_del", needProf, (req, res) => {
+  const me = req.user.id, id = String((req.body || {}).id || "");
+  if (!db.prepare("SELECT 1 FROM collections WHERE id=? AND user_id=?").get(id, me)) return res.status(404).json({ error: "not_found" });
+  db.prepare("UPDATE saves SET coll='' WHERE user_id=? AND coll=?").run(me, id); db.prepare("DELETE FROM collections WHERE id=?").run(id);
+  res.json({ ok: true });
+});
+S("coll_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, pid = String(b.id || ""), cl = String(b.coll || "");
+  if (!db.prepare("SELECT 1 FROM saves WHERE user_id=? AND post_id=?").get(me, pid)) return res.status(404).json({ error: "not_found" });
+  if (cl && !db.prepare("SELECT 1 FROM collections WHERE id=? AND user_id=?").get(cl, me)) return res.status(404).json({ error: "no_coll" });
+  db.prepare("UPDATE saves SET coll=? WHERE user_id=? AND post_id=?").run(cl, me, pid);
+  res.json({ ok: true });
+});
+
+// Notlar (24 saat, takipçilere)
+const NOTE_MS = 24 * 3600e3;
+S("note_set", needProf, (req, res) => {
+  const me = req.user.id, text = cleanText((req.body || {}).text, 60).replace(/\n/g, " ");
+  if (!limit("snote:" + me, 30, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!text) db.prepare("DELETE FROM notes WHERE user_id=?").run(me);
+  else db.prepare("INSERT INTO notes(user_id,text,created) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET text=excluded.text, created=excluded.created").run(me, text, now());
+  res.json({ ok: true });
+});
+S("notes", needProf, (req, res) => {
+  const me = req.user.id, t = now() - NOTE_MS;
+  const rows = db.prepare("SELECT n.user_id, n.text, n.created, f.handle, f.avatar FROM notes n JOIN profiles f ON f.user_id=n.user_id WHERE n.created>? AND (n.user_id=? OR n.user_id IN (SELECT followee FROM follows WHERE follower=?)) ORDER BY n.created DESC LIMIT 40").all(t, me, me);
+  res.json({ notes: rows.filter(r => visible(me, r.user_id)).map(r => ({ handle: r.handle, avatar: mediaUrl(r.avatar), text: r.text, created: r.created, own: r.user_id === me })) });
+});
+// ===== END PACK2 =====
+
+// ===== BEGIN MUSIC =====
+try { db.exec("ALTER TABLE posts ADD COLUMN sound TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE scheduled ADD COLUMN sound TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE stories ADD COLUMN sound TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+db.exec("CREATE TABLE IF NOT EXISTS sounds(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, tkey TEXT NOT NULL, media TEXT NOT NULL, dur INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL)");
+function soundRemove(id) {
+  const x = db.prepare("SELECT media FROM sounds WHERE id=?").get(id); if (!x) return;
+  db.prepare("DELETE FROM sounds WHERE id=?").run(id);
+  for (const t of ["posts", "scheduled", "stories"]) db.prepare("UPDATE " + t + " SET sound='' WHERE sound=?").run(id);
+  r2Del(x.media);
+}
+// Telifsiz, cihazda üretilen hazır melodiler
+const SYN = { "syn:lofi": "Lo-fi Sabah", "syn:ambient": "Sakin Bulutlar", "syn:piano": "Yumuşak Piyano", "syn:energy": "Enerji", "syn:night": "Gece Sürüşü", "syn:retro": "Retro Oyun" };
+const soundOk = id => { id = String(id || ""); if (!id) return ""; if (SYN[id]) return id; return /^n[a-f0-9]{8,30}$/.test(id) && db.prepare("SELECT 1 FROM sounds WHERE id=?").get(id) ? id : ""; };
+const soundUse = id => { if (!SYN[id]) db.prepare("UPDATE sounds SET uses=uses+1 WHERE id=?").run(id); };
+function soundInfo(id) {
+  if (SYN[id]) return { id, title: SYN[id], syn: true };
+  const x = db.prepare("SELECT s.id, s.title, s.media, s.dur, f.handle FROM sounds s JOIN profiles f ON f.user_id=s.user_id WHERE s.id=?").get(id);
+  return x ? { id: x.id, title: x.title, url: mediaUrl(x.media), dur: x.dur, by: x.handle } : null;
+}
+S("sound_new", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, title = cleanText(b.title, 40).replace(/\n/g, " "), media = String(b.media || ""), dur = Math.floor(+b.dur || 0);
+  if (!R2_ON) return res.status(501).json({ error: "storage_off" });
+  if (!title) return res.status(400).json({ error: "empty" });
+  if (!media.startsWith("m/" + me + "/") || !/\.(mp3|m4a|ogg|weba)$/.test(media) || media.length > 120) return res.status(400).json({ error: "bad_media" });
+  if (dur < 1 || dur > 90) return res.status(400).json({ error: "bad_duration" });
+  if (!limit("ssnd:" + me, 20, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (db.prepare("SELECT COUNT(*) n FROM sounds WHERE user_id=?").get(me).n >= 50) return res.status(400).json({ error: "too_many" });
+  if (db.prepare("SELECT 1 FROM sounds WHERE media=?").get(media)) return res.status(400).json({ error: "bad_media" });
+  const id = "n" + rnd(10); db.prepare("INSERT INTO sounds(id,user_id,title,tkey,media,dur,created) VALUES(?,?,?,?,?,?,?)").run(id, me, title, nrm(title), media, dur, now());
+  res.json({ ok: true, sound: soundInfo(id) });
+});
+S("sound_list", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, q = nrm(cleanText(b.q, 30)).replace(/[%_\\]/g, ""), mine = !!b.mine;
+  const rows = db.prepare("SELECT s.id FROM sounds s WHERE " + (mine ? "s.user_id=?" : "s.user_id<>? ") + (q ? " AND s.tkey LIKE ? ESCAPE '\\'" : "") + " AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=s.user_id) AND NOT EXISTS(SELECT 1 FROM blocks k WHERE (k.blocker=? AND k.blocked=s.user_id) OR (k.blocker=s.user_id AND k.blocked=?)) ORDER BY s.uses DESC, s.created DESC LIMIT 30").all(...(q ? [me, "%" + q + "%", me, me] : [me, me, me]));
+  res.json({ sounds: rows.map(r => Object.assign(soundInfo(r.id), { uses: db.prepare("SELECT uses FROM sounds WHERE id=?").get(r.id).uses })) });
+});
+S("sound_del", needProf, (req, res) => {
+  const id = String((req.body || {}).id || ""), x = db.prepare("SELECT user_id FROM sounds WHERE id=?").get(id);
+  if (!x || x.user_id !== req.user.id) return res.status(404).json({ error: "not_found" });
+  soundRemove(id); res.json({ ok: true });
+});
+// ===== END MUSIC =====
+
 
 
 
@@ -1626,8 +1744,8 @@ S("comment_pin", needProf, (req, res) => {
 // ===== BEGIN MEDIA PROXY =====
 // Görsel/video/ses: telefon operatörü r2.dev ya da R2 yükleme adresine ulaşamasa da uygulama yalnızca bu sunucuyla konuşur.
 const ISSUED = new Map(); // upload ile verilmiş anahtarlar: key -> { uid, type, size, exp }
-const MEDIA_KEY_RE = /^m\/[A-Za-z0-9_-]{1,40}\/[0-9a-f]{24}\.(jpg|png|webp|mp4|webm|mov|weba|m4a|ogg|enc)$/;
-const EXT_TYPE = { jpg: "image/jpeg", png: "image/png", webp: "image/webp", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", weba: "audio/webm", m4a: "audio/mp4", ogg: "audio/ogg", enc: "application/octet-stream" };
+const MEDIA_KEY_RE = /^m\/[A-Za-z0-9_-]{1,40}\/[0-9a-f]{24}\.(jpg|png|webp|mp4|webm|mov|weba|m4a|ogg|mp3|enc)$/;
+const EXT_TYPE = { jpg: "image/jpeg", png: "image/png", webp: "image/webp", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", weba: "audio/webm", m4a: "audio/mp4", ogg: "audio/ogg", mp3: "audio/mpeg", enc: "application/octet-stream" };
 async function serveMedia(req, res, key) {
   if (!R2_ON || !MEDIA_KEY_RE.test(key)) return res.json({ error: "not_found" }, 404);
   if (!limit("med:" + req.ip, 1200, 60000)) return res.json({ error: "rate_limited" }, 429);
