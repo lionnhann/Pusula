@@ -58,7 +58,7 @@ input[type=checkbox]{accent-color:var(--ac);width:18px;height:18px;padding:0}
 .m{padding:10px 13px;border-radius:12px;max-width:94%;white-space:pre-wrap;overflow-wrap:anywhere}
 .m.j{align-self:flex-start;border-left:2px solid var(--ac);border-radius:4px 12px 12px 4px;background:color-mix(in srgb,var(--ac) 6%,transparent)}
 .m.u{align-self:flex-end;background:rgba(86,200,245,.16);border:1px solid var(--bd2)}
-#mic.on,#cm.on{background:var(--bad);border-color:var(--bad);color:#fff}
+#mic.on,#cm.on,#hw.on{background:var(--bad);border-color:var(--bad);color:#fff}
 .g{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}.g label{font-size:12.5px;color:var(--mu)}
 .res{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:12px 8px;margin-top:6px}
 .res div{background:none;border-left:2px solid var(--bd2);padding:2px 0 2px 12px;border-radius:0}
@@ -254,7 +254,7 @@ h1{white-space:nowrap}
 #log:has(.m:nth-child(2)),#log:has(.m.u){flex:1}
 .chips{-webkit-mask:linear-gradient(90deg,#000 88%,transparent);mask:linear-gradient(90deg,#000 88%,transparent);scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
 .chat .row{flex-wrap:wrap;align-items:center}
-#mic,#vo,#cm{width:40px;height:40px;padding:0;display:inline-grid;place-items:center;border-radius:50%;flex:none}
+#mic,#vo,#cm,#hw{width:40px;height:40px;padding:0;display:inline-grid;place-items:center;border-radius:50%;flex:none}
 @media(max-width:1100px){.chat{height:auto;min-height:440px;max-height:80vh;padding:16px}.chat .chead{padding-bottom:10px;margin-bottom:8px}.orb{width:44px;height:44px}.chat .row input#q{flex:1 1 100%}}
 @media(max-width:420px){.cwg{gap:6px}.cwg button{padding:9px 10px;column-gap:8px}.cwg button b{width:32px;height:32px;font-size:18px}}
 input[type=date]{min-width:142px}input[type=time]{min-width:100px}
@@ -279,7 +279,7 @@ input[type=date]{min-width:142px}input[type=time]{min-width:100px}
 <section class="card chat"><div class="chead"><div class="orb" aria-hidden="true"></div><div><b>Pusula</b><span id="stt">Hazır</span></div><button id="cclose" type="button" aria-label="Sohbeti kapat" title="Kapat">✕</button></div><div id="log" role="log" aria-live="polite" aria-label="Pusula sohbeti"></div>
 <div class="cwel" aria-label="Öneriler"><div class="cwt">Bugün neye yardım edeyim?</div><div class="cwg"><button data-q="Bugün ne yapmalıyım? Önceliklerimi sırala."><b>🎯</b><span>Bugün ne yapmalıyım?</span><small>Önceliklerini sıralar</small></button><button data-q="En çok odaklandığım iş alanı için 5 yeni fikir ver."><b>💡</b><span>Fikir ver</span><small>5 yeni fikir</small></button><button data-q="Bağlı verilerime (kanal, mağaza, kasa) bakarak durumumu kısaca değerlendir."><b>📈</b><span>Durumum nasıl?</span><small>Verilerini yorumlar</small></button><button data-q="Bu ayki kasa durumumu özetle."><b>💰</b><span>Kasa özeti</span><small>Bu ayın gelir/gideri</small></button><button data-q="Bugünü değerlendir: neler tamamlandı, neler kaldı, yarın için en önemli 3 öncelik ne olmalı? Gerekirse yarına görev ekle."><b>🌙</b><span>Gün sonu</span><small>Yarın için 3 öncelik</small></button></div></div>
 <div class="chips"><button data-q="Bugün ne yapmalıyım? Önceliklerimi sırala.">🎯 Bugün ne yapmalıyım?</button><button data-q="En çok odaklandığım iş alanı için 5 yeni fikir ver.">💡 Fikir ver</button><button data-q="Bağlı verilerime (kanal, mağaza, kasa) bakarak durumumu kısaca değerlendir.">📈 Durumum nasıl?</button><button data-q="Bu ayki kasa durumumu özetle.">💰 Kasa özeti</button><button data-q="Bugünü değerlendir: neler tamamlandı, neler kaldı, yarın için en önemli 3 öncelik ne olmalı? Gerekirse yarına görev ekle.">🌙 Gün sonu</button></div>
-<div class="row" style="margin-top:6px"><input id="q" placeholder="Komut ver… (örn. 'Vlog için yarına montaj görevi ekle')"><button id="mic" title="Sesli komut">🎙</button><button id="vo" title="Sesli yanıt">🔊</button><button id="cm" title="Sesli sohbet modu: konuş, Pusula sesli yanıtlasın, tekrar dinlesin">🎧</button><button id="cstop" hidden title="Yanıtı durdur">■ Durdur</button><button id="go" class="pr">Gönder</button></div><small style="color:var(--mu);margin-top:6px">Bir Pusula mesajına dokunursan sesli okur.</small></section></div>
+<div class="row" style="margin-top:6px"><input id="q" placeholder="Komut ver… (örn. 'Vlog için yarına montaj görevi ekle')"><button id="mic" title="Sesli komut">🎙</button><button id="vo" title="Sesli yanıt">🔊</button><button id="hw" title="Hey Pusula: \"Pusula\" deyince dinlemeye başla (uygulama açıkken)">👂</button><button id="cm" title="Sesli sohbet modu: konuş, Pusula sesli yanıtlasın, tekrar dinlesin">🎧</button><button id="cstop" hidden title="Yanıtı durdur">■ Durdur</button><button id="go" class="pr">Gönder</button></div><small style="color:var(--mu);margin-top:6px">Bir Pusula mesajına dokunursan sesli okur.</small></section></div>
 <button id="cfab" type="button" aria-label="Pusula sohbetini aç" title="Pusula ile sohbet">💬</button>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script>
@@ -891,7 +891,7 @@ document.addEventListener("click",e=>{const b=e.target.closest("button"),i=e.tar
  if(b?.dataset.a){cur=b.dataset.a;taskLim=100;tagF={a:"",t:""};draw()}
  else if(b?.id==="ta")addT();else if(b?.dataset.r)del("tasks",()=>{S.tasks=S.tasks.filter(t=>t.id!==b.dataset.r)},"Görev silindi")
  else if(b?.id==="go")sendQ();else if(b?.id==="mic")mic();else if(b?.id==="vo"){S.voice=!S.voice;if(!S.voice)speechSynthesis?.cancel();else speak("Ses açık.");vo();save()}
- else if(b?.id==="cm"){vc=!vc;b.classList.toggle("on",vc);if(vc){S.voice=true;vo();save();speak("Sesli sohbet açık. Dinliyorum.",()=>{if(vc)mic()})}else{try{rec&&rec.stop()}catch(e){}speechSynthesis?.cancel()}}
+ else if(b?.id==="hw")hyToggle();else if(b?.id==="cm"){vc=!vc;b.classList.toggle("on",vc);if(vc){S.voice=true;vo();save();speak("Sesli sohbet açık. Dinliyorum.",()=>{if(vc)mic()})}else{try{rec&&rec.stop()}catch(e){}speechSynthesis?.cancel()}}
  else if(b?.id==="brief")send("Bugünkü brifimi ver: tüm alanlardaki açık görevleri öncelik sırasına koy, geciken veya yakın tarihli olanları belirt, her aktif alan için tek bir somut sonraki adım öner. Kısa tut.");
  else if(b?.id==="exp"){exp()}
  else if(b?.dataset.s){const t=S.tasks.find(t=>t.id===b.dataset.s);if(t){t.pri=!t.pri;save();draw()}}
@@ -1550,6 +1550,41 @@ function mic(){const R=window.SpeechRecognition||window.webkitSpeechRecognition;
  if(rec){rec.stop();return}speechSynthesis?.cancel();rec=new R();rec.lang=EN?"en-US":"tr-TR";rec.onresult=e=>send(e.results[0][0].transcript);
  rec.onend=()=>{rec=null;$("#mic").classList.remove("on")};rec.onerror=e=>{if(e.error!=="aborted"){vc=false;$("#cm")?.classList.remove("on");addMsg("j","Mikrofon hatası: "+e.error+(e.error==="not-allowed"?" (mikrofon izni gerekli)":e.error==="no-speech"?" (ses duyulmadı, sohbet modu kapandı)":""))}};
  $("#mic").classList.add("on");try{rec.start()}catch(e){}}
+
+/* Hey Pusula: uygulama açıkken "Pusula" kelimesini dinler */
+let hyOn=false,hyR=null;
+function hyUi(){const b=$("#hw");if(b)b.classList.toggle("on",hyOn)}
+function hyStop(){hyOn=false;const r=hyR;hyR=null;try{r&&r.abort()}catch(e){}hyUi()}
+let hyLast=0;function hyHit(t){if(Date.now()-hyLast<2500)return true;hyLast=Date.now();const m=String(t||"").toLocaleLowerCase("tr").match(/pusula[\s,.!?]*(.*)$/);if(!m)return false;const rest=m[1].trim();
+ if(rest.length>2)send(rest);else{toast(trs("Dinliyorum…"));setTimeout(()=>{if(!rec)mic()},250)}return true}
+async function hyStart(){
+ if(!hyOn||hyR||rec||sending)return;
+ try{if(window.speechSynthesis&&speechSynthesis.speaking)return}catch(e){}
+ const N=typeof natSR==="function"?natSR():null;
+ if(N){
+  const me={abort(){try{N.stop()}catch(e){}}};hyR=me;
+  try{
+   const r=await N.start({language:EN?"en-US":"tr-TR",maxResults:3,prompt:"",partialResults:false,popup:false});
+   if(hyR===me)hyR=null;
+   if(hyOn&&r&&r.matches){const hit=r.matches.find(x=>/pusula/i.test(String(x).toLocaleLowerCase("tr")));if(hit)hyHit(hit)}
+  }catch(e){if(hyR===me)hyR=null}
+  return}
+ const R=window.SpeechRecognition||window.webkitSpeechRecognition;if(!R)return;
+ const r=new R();r.lang=EN?"en-US":"tr-TR";r.continuous=true;r.interimResults=true;hyR=r;
+ r.onresult=e=>{for(let i=e.resultIndex;i<e.results.length;i++){const t=e.results[i][0].transcript;if(/pusula/i.test(t.toLocaleLowerCase("tr"))){if(e.results[i].isFinal||/pusula\s+\S{3,}/i.test(t.toLocaleLowerCase("tr"))){hyR=null;try{r.abort()}catch(_){}hyHit(t);return}if(!r._h){r._h=1;setTimeout(()=>{try{r.stop()}catch(_){}},1200)}}}};
+ r.onend=()=>{if(hyR===r)hyR=null};
+ r.onerror=e=>{if(e.error==="not-allowed"||e.error==="service-not-allowed"){hyStop();addMsg("j","Hey Pusula için mikrofon izni gerekli.")}};
+ try{r.start()}catch(e){hyR=null}}
+async function hyToggle(){
+ if(hyOn){hyStop();toast(trs("Hey Pusula kapalı"));return}
+ const N=typeof natSR==="function"?natSR():null;
+ if(N){try{const av=await N.available();if(!av||!av.available){addMsg("j","Bu telefonda ses tanıma servisi yok.");return}
+  let p=await N.checkPermissions();if(!p||p.speechRecognition!=="granted")p=await N.requestPermissions();
+  if(!p||p.speechRecognition!=="granted"){addMsg("j","Mikrofon izni verilmedi.");return}}catch(e){addMsg("j","Mikrofon hatası.");return}}
+ else if(!(window.SpeechRecognition||window.webkitSpeechRecognition)){addMsg("j","Bu tarayıcı sesli komutu desteklemiyor. Chrome veya Edge dene.");return}
+ hyOn=true;hyUi();toast(trs("Hey Pusula açık — \"Pusula\" de, ben dinleyeyim. Uygulama açıkken çalışır."));hyStart()}
+setInterval(()=>{if(hyOn)hyStart()},1500);
+document.addEventListener("visibilitychange",()=>{if(document.hidden&&hyR){const r=hyR;hyR=null;try{r.abort()}catch(e){}}});
 async function expCsv(){try{const d=await claude.use("downloads");if(!d)return;const sep=LANG==="en"?",":";",nm=k=>(A.find(a=>a[0]===k)||[0,k])[1],rp={d:"Her gün",w:"Her hafta",wd:"Hafta içi",m:"Her ay"};
  const q=v=>{let x=String(v==null?"":v);if(/^[=+\-@\t\r]/.test(x))x="'"+x;return /["\n\r;,]/.test(x)?'"'+x.replace(/"/g,'""')+'"':x};
  const H=["Alan","Görev","Tarih","Saat","Durum","Öncelik","Tekrar","Not","Alt görevler"].map(h=>trs(h)),R=S.tasks.map(t=>[nm(t.area),t.text,t.due||"",t.time||"",trs(t.done?"Bitti":"Açık"),t.pri?"★":"",t.rep?trs(rp[t.rep]||""):"",t.note||"",(t.subs||[]).map(x=>(x.d?"[x] ":"[ ] ")+x.t+(x.due?" ("+x.due+")":"")).join(" | ")]);
