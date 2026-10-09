@@ -58,10 +58,10 @@ async function tab(t){CUR=t;document.querySelectorAll("#tabs button").forEach(b=
 async function sum(v){const r=await api("stats");if(r.s!==200){v.innerHTML='<p style="color:var(--bad)">Alınamadı.</p>';return}
  const S=[["Kullanıcı",r.users],["Son 7 gün yeni",r.users7],["Profil",r.profiles],["Paylaşım",r.posts],["Son 7 gün paylaşım",r.posts7],["Aktif hikâye",r.stories],["Mesaj (şifreli)",r.msgs],["Grup",r.groups],["Açık şikâyet",r.reports],["Yasaklı",r.bans],["Şifreleme anahtarı",r.e2e_keys]];
  v.innerHTML='<div class="card"><div class="stats">'+S.map(x=>`<div class="stat"><b>${esc(x[1])}</b><span>${esc(x[0])}</span></div>`).join("")+'</div></div><p class="mu">Mesaj içerikleri uçtan uca şifreli olduğu için burada görünmez; yalnızca şikâyet edilen mesajın metni kanıt olarak gelir.</p>'}
-const KIND={sound:"Ses",community:"Topluluk",listing:"İlan",post:"Gönderi",story:"Hikâye",comment:"Yorum",user:"Kullanıcı",msg:"Mesaj",group:"Grup"};
+const KIND={live:"Canlı yayın",sound:"Ses",community:"Topluluk",listing:"İlan",post:"Gönderi",story:"Hikâye",comment:"Yorum",user:"Kullanıcı",msg:"Mesaj",group:"Grup"};
 async function rep(v){const r=await api("reports");if(r.s!==200){v.innerHTML='<p style="color:var(--bad)">Alınamadı.</p>';return}
  if(!r.reports.length){v.innerHTML='<div class="card">Açık şikâyet yok. 🎉</div>';return}
- v.innerHTML=r.reports.map(x=>{const rm=x.kind==="post"?{post:x.target}:x.kind==="story"?{story:x.target}:x.kind==="comment"?{comment:x.target}:x.kind==="msg"?{msg:x.target}:x.kind==="community"?{community:x.target}:x.kind==="listing"?{listing:x.target}:x.kind==="sound"?{sound:x.target}:null;
+ v.innerHTML=r.reports.map(x=>{const rm=x.kind==="post"?{post:x.target}:x.kind==="story"?{story:x.target}:x.kind==="comment"?{comment:x.target}:x.kind==="msg"?{msg:x.target}:x.kind==="community"?{community:x.target}:x.kind==="listing"?{listing:x.target}:x.kind==="sound"?{sound:x.target}:x.kind==="live"?{live:x.target}:null;
   const bh=x.kind==="user"?x.target:x.target_handle;
   return `<div class="card" data-id="${esc(x.id)}"><div class="row"><span class="tag">${esc(KIND[x.kind]||x.kind)}</span><span class="mu">@${esc(x.reporter_handle||"?")} bildirdi · ${ago(x.created)}</span>${bh?`<span class="sp"></span><b>@${esc(bh)}</b>`:""}</div>
   ${x.reason?`<p><b>Neden:</b> ${esc(x.reason)}</p>`:""}${x.preview?`<div class="ev">${esc(x.preview)}</div>`:""}${x.evidence?`<div class="ev"><b>Kanıt (şikâyet eden gönderdi):</b>\n${esc(x.evidence)}</div>`:""}
