@@ -588,11 +588,12 @@ S("post", needProf, (req, res) => {
 
 S("feed", needProf, (req, res) => {
   const b = req.body || {}, me = req.user.id, before = +b.before || now() + 1, mode = ["following", "all", "reels", "user", "foryou", "freels"][["following", "all", "reels", "user", "foryou", "freels"].indexOf(b.mode)] || "all";
-  let rows;
+  let rows, pinnedId = "";
   if (mode === "user") {
     const p = profByHandle(b.handle); if (!p) return res.status(404).json({ error: "no_user" });
     if (blockedEither(me, p.user_id)) return res.json({ posts: [] });
     rows = db.prepare(`${POST_SEL} WHERE p.user_id=? AND p.community='' AND p.created<? ORDER BY p.created DESC LIMIT 20`).all(p.user_id, before);
+    if (!b.before) { const pn = db.prepare("SELECT pinned FROM profiles WHERE user_id=?").get(p.user_id); if (pn && pn.pinned) { const pr = db.prepare(`${POST_SEL} WHERE p.id=? AND p.user_id=? AND p.community=''`).get(pn.pinned, p.user_id); if (pr) { rows = [pr, ...rows.filter(x => x.id !== pr.id)]; pinnedId = pr.id; } } }
   } else if (mode === "following") {
     rows = db.prepare(`${POST_SEL} WHERE (p.user_id=? OR p.user_id IN (SELECT followee FROM follows WHERE follower=?)) AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(me, me, before, me, me);
   } else if (mode === "foryou") {
@@ -612,14 +613,14 @@ S("feed", needProf, (req, res) => {
   } else {
     rows = db.prepare(`${POST_SEL} WHERE p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(before, me, me);
   }
-  res.json({ posts: postRows(rows, me) });
+  res.json({ posts: postRows(rows, me).map(x => pinnedId && x.id === pinnedId ? Object.assign(x, { pinned: true }) : x) });
 });
 
 S("like", needProf, (req, res) => {
   if (!limit("slike:" + req.user.id, 200, 600e3)) return res.status(429).json({ error: "rate_limited" });
   const id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id);
   if (!p || blockedEither(req.user.id, p.user_id)) return res.status(404).json({ error: "not_found" });
-  if ((req.body || {}).on) { db.prepare("INSERT OR IGNORE INTO likes(post_id,user_id) VALUES(?,?)").run(id, req.user.id); notify(p.user_id, req.user.id, "like", id, "", true); } else db.prepare("DELETE FROM likes WHERE post_id=? AND user_id=?").run(id, req.user.id);
+  if ((req.body || {}).on) { db.prepare("INSERT OR IGNORE INTO likes(post_id,user_id,created) VALUES(?,?,?)").run(id, req.user.id, now()); notify(p.user_id, req.user.id, "like", id, "", true); } else db.prepare("DELETE FROM likes WHERE post_id=? AND user_id=?").run(id, req.user.id);
   res.json({ likes: db.prepare("SELECT COUNT(*) n FROM likes WHERE post_id=?").get(id).n });
 });
 
@@ -1160,7 +1161,7 @@ S("msg_delete", needProf, (req, res) => {
 function purgeUserMedia(uid) {
   const keys = new Set();
   for (const c of db.prepare("SELECT handle FROM communities WHERE owner=?").all(uid)) deleteCommunity(c.handle);
-  for (const q of ["SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
+  for (const q of ["SELECT media FROM scheduled WHERE user_id=?", "SELECT poster media FROM scheduled WHERE user_id=?", "SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
     for (const r of db.prepare(q).all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT media FROM msgs WHERE from_id=? OR to_id=?").all(uid, uid)) if (r.media) keys.add(r.media);
   for (const k of keys) r2Del(k);
@@ -1292,6 +1293,101 @@ S("c_delete", needProf, (req, res) => {
   deleteCommunity(c.handle); res.json({ ok: true });
 });
 // ===== END COMMUNITIES =====
+
+// ===== BEGIN STUDIO =====
+// Üretici Stüdyosu: istatistikler, zamanlanmış paylaşım, profil sabitleme
+try { db.exec("ALTER TABLE likes ADD COLUMN created INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE profiles ADD COLUMN pinned TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+db.exec(`
+CREATE TABLE IF NOT EXISTS scheduled(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', media TEXT NOT NULL DEFAULT '', poster TEXT NOT NULL DEFAULT '', community TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sched_at ON scheduled(at);
+`);
+const SCHED_MIN = process.env.SCHED_MIN_MS !== undefined ? +process.env.SCHED_MIN_MS : 60000, SCHED_TICK = +process.env.SCHED_TICK_MS || 30000;
+function checkPostInput(uid, b) {
+  const kind = ["text", "photo", "reel"].includes(b.kind) ? b.kind : "", text = cleanText(b.text, 1000), media = String(b.media || "");
+  if (!kind) return { status: 400, error: "bad_kind" };
+  if (kind === "text" && !text) return { status: 400, error: "empty" };
+  if (kind !== "text") {
+    if (!R2_ON) return { status: 501, error: "storage_off" };
+    const okExt = kind === "photo" ? /\.(jpg|png|webp)$/ : /\.(mp4|webm|mov)$/;
+    if (!media.startsWith("m/" + uid + "/") || !okExt.test(media) || media.length > 120) return { status: 400, error: "bad_media" };
+  }
+  let cid = "";
+  if (b.community) {
+    const c = cByHandle(b.community); if (!c) return { status: 404, error: "no_community" };
+    const m = db.prepare("SELECT role FROM community_members WHERE cid=? AND user_id=?").get(c.id, uid);
+    if (!m || db.prepare("SELECT 1 FROM community_bans WHERE cid=? AND user_id=?").get(c.id, uid)) return { status: 403, error: "not_member" };
+    if (c.posting === "mods" && m.role === "member") return { status: 403, error: "mods_only" };
+    cid = c.id;
+  }
+  let poster = String(b.poster || "");
+  if (poster && (kind !== "reel" || !poster.startsWith("m/" + uid + "/") || !/\.(jpg|png|webp)$/.test(poster) || poster.length > 120)) poster = "";
+  return { kind, text, media: kind === "text" ? "" : media, poster: kind === "reel" ? poster : "", cid };
+}
+function schedTick() {
+  let due; try { due = db.prepare("SELECT * FROM scheduled WHERE at<=? ORDER BY at LIMIT 20").all(now()); } catch (e) { return; }
+  for (const r of due) {
+    try {
+      db.prepare("DELETE FROM scheduled WHERE id=?").run(r.id);
+      const hasProf = db.prepare("SELECT 1 FROM profiles WHERE user_id=?").get(r.user_id);
+      const com = r.community ? db.prepare("SELECT handle FROM communities WHERE id=?").get(r.community) : null;
+      const v = hasProf && !isBanned(r.user_id) ? checkPostInput(r.user_id, { kind: r.kind, text: r.text, media: r.media, poster: r.poster, community: com ? com.handle : (r.community ? "-" : "") }) : { error: "x" };
+      if (v.error) { if (r.media) r2Del(r.media); if (r.poster) r2Del(r.poster); continue; }
+      const id = "p" + rnd(8);
+      db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,community,created) VALUES(?,?,?,?,?,?,?,?)").run(id, r.user_id, v.kind, v.text, v.media, v.poster, v.cid, now());
+      afterPost(id, r.user_id, v.text);
+    } catch (e) { console.error("sched:", e.message); }
+  }
+}
+setInterval(schedTick, SCHED_TICK).unref();
+S("sched_new", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, at = Math.floor(+b.at);
+  if (!limit("ssched:" + me, 30, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!(at > now() + SCHED_MIN - 1000) || at > now() + 30 * 864e5) return res.status(400).json({ error: "bad_time" });
+  if (db.prepare("SELECT COUNT(*) n FROM scheduled WHERE user_id=?").get(me).n >= 20) return res.status(400).json({ error: "too_many_scheduled" });
+  const v = checkPostInput(me, b); if (v.error) return res.status(v.status).json({ error: v.error });
+  const id = "s" + rnd(8);
+  db.prepare("INSERT INTO scheduled(id,user_id,kind,text,media,poster,community,at,created) VALUES(?,?,?,?,?,?,?,?,?)").run(id, me, v.kind, v.text, v.media, v.poster, v.cid, at, now());
+  res.json({ ok: true, id, at });
+});
+S("sched_list", needProf, (req, res) => {
+  const rows = db.prepare("SELECT s.*, c.handle ch, c.name cn FROM scheduled s LEFT JOIN communities c ON c.id=s.community WHERE s.user_id=? ORDER BY s.at").all(req.user.id);
+  res.json({ items: rows.map(r => ({ id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), at: r.at, community: r.ch ? { handle: r.ch, name: r.cn } : null })) });
+});
+S("sched_cancel", needProf, (req, res) => {
+  const id = String((req.body || {}).id || ""), r = db.prepare("SELECT media, poster FROM scheduled WHERE id=? AND user_id=?").get(id, req.user.id);
+  if (!r) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM scheduled WHERE id=?").run(id); if (r.media) r2Del(r.media); if (r.poster) r2Del(r.poster);
+  res.json({ ok: true });
+});
+S("pin", needProf, (req, res) => {
+  const id = String((req.body || {}).id || "");
+  if (id) { const p = db.prepare("SELECT user_id, community FROM posts WHERE id=?").get(id); if (!p || p.user_id !== req.user.id || p.community) return res.status(404).json({ error: "not_found" }); }
+  db.prepare("UPDATE profiles SET pinned=? WHERE user_id=?").run(id, req.user.id);
+  res.json({ ok: true, pinned: id });
+});
+S("creator_stats", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, days = [7, 30, 90].includes(+b.days) ? +b.days : 7, tz = Math.max(-840, Math.min(840, Math.round(+b.tz || 0))), t = now(), since = t - days * 864e5;
+  const k0 = Math.floor((t + tz * 6e4) / 864e5), idx = ts => days - 1 - (k0 - Math.floor((ts + tz * 6e4) / 864e5));
+  const series = () => new Array(days).fill(0), S_ = { followers: series(), likes: series(), comments: series(), views: series() };
+  const fill = (arr, rows) => { for (const r of rows) { const i = idx(r.created); if (i >= 0 && i < days) arr[i]++; } };
+  fill(S_.followers, db.prepare("SELECT created FROM follows WHERE followee=? AND created>?").all(me, since));
+  fill(S_.likes, db.prepare("SELECT l.created FROM likes l JOIN posts p ON p.id=l.post_id WHERE p.user_id=? AND l.user_id<>? AND l.created>?").all(me, me, since));
+  fill(S_.comments, db.prepare("SELECT c.created FROM comments c JOIN posts p ON p.id=c.post_id WHERE p.user_id=? AND c.user_id<>? AND c.created>?").all(me, me, since));
+  fill(S_.views, db.prepare("SELECT v.created FROM reel_views v JOIN posts p ON p.id=v.post_id WHERE p.user_id=? AND v.created>?").all(me, since));
+  const sum = a => a.reduce((x, y) => x + y, 0);
+  const posts = db.prepare("SELECT id, kind, text, media, poster, created FROM posts WHERE user_id=? AND created>?").all(me, t - 90 * 864e5);
+  const ids = posts.map(p => p.id), ph = ids.map(() => "?").join(",");
+  const cnt = sql => ids.length ? Object.fromEntries(db.prepare(sql.replace("##", ph)).all(...ids).map(r => [r.post_id, r.n])) : {};
+  const lk = cnt("SELECT post_id, COUNT(*) n FROM likes WHERE post_id IN (##) GROUP BY post_id"), cm = cnt("SELECT post_id, COUNT(*) n FROM comments WHERE post_id IN (##) GROUP BY post_id"), vw = cnt("SELECT post_id, COUNT(*) n FROM reel_views WHERE post_id IN (##) GROUP BY post_id");
+  const scored = posts.map(p => ({ p, eng: 2 * (lk[p.id] || 0) + 3 * (cm[p.id] || 0) + 0.3 * (vw[p.id] || 0) }));
+  const top = scored.slice().sort((a, b2) => b2.eng - a.eng || b2.p.created - a.p.created).slice(0, 5).map(x => ({ id: x.p.id, kind: x.p.kind, text: x.p.text.slice(0, 80), media: mediaUrl(x.p.poster || (x.p.kind === "photo" ? x.p.media : "")), created: x.p.created, likes: lk[x.p.id] || 0, comments: cm[x.p.id] || 0, views: vw[x.p.id] || 0 }));
+  const hrs = {}; for (const x of scored) { const h = Math.floor(((x.p.created + tz * 6e4) % 864e5 + 864e5) % 864e5 / 36e5); (hrs[h] = hrs[h] || []).push(x.eng); }
+  const best = posts.length >= 3 ? Object.keys(hrs).map(h => ({ hour: +h, avg: sum(hrs[h]) / hrs[h].length, n: hrs[h].length })).sort((a, b2) => b2.avg - a.avg || b2.n - a.n).slice(0, 3).map(x => ({ hour: x.hour, posts: x.n })) : [];
+  res.json({ days, followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(me).n, newFollowers: sum(S_.followers), likes: sum(S_.likes), comments: sum(S_.comments), views: sum(S_.views), posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=? AND created>?").get(me, since).n, series: S_, top, bestHours: best });
+});
+// ===== END STUDIO =====
+
 
 
 
