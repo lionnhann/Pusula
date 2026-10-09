@@ -313,7 +313,7 @@ input[type=date]{min-width:142px}input[type=time]{min-width:100px}
 .sovh{display:flex;justify-content:space-between;align-items:center;color:#fff}.sovh .sou{color:#fff}.sovh small{color:#fffa}.sovx{background:none;border:0;color:#fff;font-size:20px;padding:6px 10px}
 .sovz{position:absolute;top:70px;bottom:70px;width:38%;background:none;border:0;z-index:1;padding:0}.sovz.l{left:0}.sovz.r{right:0}
 .sovf{position:absolute;left:0;right:0;bottom:0;padding:10px;display:flex;gap:8px;z-index:3;background:linear-gradient(transparent,#000a)}.sovf input{flex:1;min-width:0;border-radius:999px;background:#0008;color:#fff;border-color:#fff6}.sovf button{border-radius:999px}
-@media (max-width:1100px){.sonav{margin-right:64px}.sosheet{z-index:140}}
+.sowrap{max-width:460px;margin:0 auto;width:100%}@media (min-width:700px){.sowrap{border-left:1px solid var(--bd);border-right:1px solid var(--bd);min-height:100vh;padding-left:14px;padding-right:14px}.sonav{max-width:460px;margin-left:auto;margin-right:auto}}@media (max-width:1100px){.sonav{margin-right:64px}.sosheet{z-index:140}}
 .btn{font:500 14px var(--f2);color:var(--tx);background:var(--p2);border:1px solid var(--bd);border-radius:10px;padding:8px 13px}.somenu{position:fixed!important;left:50%!important;top:50%!important;right:auto!important;transform:translate(-50%,-50%);z-index:95!important}
 </style></head><body>
 <noscript><p style="padding:20px;font:16px system-ui">Pusula çalışmak için JavaScript gerektirir.</p></noscript>
@@ -1749,7 +1749,7 @@ const soCl=()=>document.querySelectorAll(".somenu,.sorp").forEach(x=>x.remove())
 function soHead(){const n=SO.notif,u=SO.unread;return `<div class="somh"><div class="sobrand">${SOLOGO(34)}<b>Pusula Medya</b></div><div class="somi"><button class="soic ${SO.tab==="notif"?"on":""}" data-st="notif" aria-label="Bildirimler">🔔${n?`<b class="sobadge">${n>99?"99+":n}</b>`:""}</button><button class="soic ${SO.tab==="dm"?"on":""}" data-st="dm" aria-label="Mesajlar">💬${u?`<b class="sobadge">${u>99?"99+":u}</b>`:""}</button></div></div>`}
 function soHeadRefresh(){const h=document.querySelector(".somh");if(h)h.outerHTML=soHead();soBadge()}
 function soNav(){const T=[["feed","🏠","Akış"],["explore","🔍","Keşfet"],["new","＋","Paylaş"],["reels","🎬","Reels"],["me","","Profil"]];
- return `<nav class="sonav" role="tablist" aria-label="Pusula Medya">${T.map(t=>`<button data-st="${t[0]}" role="tab" aria-selected="${SO.tab===t[0]}" aria-label="${t[2]}" class="${SO.tab===t[0]?"on":""} ${t[0]==="new"?"sonew":""}">${t[0]==="me"?soAv(SO.profile.handle,SO.profile.avatar,26):`<span class="soni">${t[1]}</span>`}<small>${t[2]}</small></button>`).join("")}</nav>`}
+ return `<div class="sonav" role="tablist" aria-label="Pusula Medya">${T.map(t=>`<button data-st="${t[0]}" role="tab" aria-selected="${SO.tab===t[0]}" aria-label="${t[2]}" class="${SO.tab===t[0]?"on":""} ${t[0]==="new"?"sonew":""}">${t[0]==="me"?soAv(SO.profile.handle,SO.profile.avatar,26):`<span class="soni">${t[1]}</span>`}<small>${t[2]}</small></button>`).join("")}</div>`}
 async function drawSoc(){
  const m=$("#main"),T=`<h2 class="sobrand big">${SOLOGO(30)}<b>Pusula Medya</b></h2>`;
  if(!soOn()){m.innerHTML=`<div class="card">${T}<p style="color:var(--mu)">Paylaşım ve mesajlaşma için bir hesapla giriş yapman gerekir. Misafir oturumunda kapalı.</p><button data-a="home">← Ana sayfa</button></div>`;return}
