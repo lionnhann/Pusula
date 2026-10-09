@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test.js && node test_billing.js && node test_ai.js && node test_backup.js && node test_mail.js && node test_social.js && node test_google.js && node test_social2.js && node test_e2e.js && node test_social3.js && node test_receipt.js && node test_reels.js && node test_comm.js && node test_studio.js"
+    "test": "node test.js && node test_billing.js && node test_ai.js && node test_backup.js && node test_mail.js && node test_social.js && node test_google.js && node test_social2.js && node test_e2e.js && node test_social3.js && node test_receipt.js && node test_reels.js && node test_comm.js && node test_studio.js && node test_shop.js"
   },
   "engines": {
     "node": ">=22.13"

@@ -658,7 +658,7 @@ S("user", needProf, (req, res) => {
   const blocked = blockedEither(me, p.user_id);
   res.json({ profile: pubProf(p), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
     followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(p.user_id).n, following: db.prepare("SELECT COUNT(*) n FROM follows WHERE follower=?").get(p.user_id).n,
-    posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=?").get(p.user_id).n, isFollowing: !!db.prepare("SELECT 1 FROM follows WHERE follower=? AND followee=?").get(me, p.user_id) });
+    posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=?").get(p.user_id).n, listings: db.prepare("SELECT COUNT(*) n FROM listings WHERE user_id=? AND status='active'").get(p.user_id).n, isFollowing: !!db.prepare("SELECT 1 FROM follows WHERE follower=? AND followee=?").get(me, p.user_id) });
 });
 S("search", needProf, (req, res) => {
   const q = String((req.body || {}).q || "").trim().replace(/[^a-zA-Z0-9_.]/g, "").slice(0, 20);
@@ -682,7 +682,7 @@ S("block", needProf, (req, res) => {
 });
 S("report", needProf, (req, res) => {
   if (!limit("srep:" + req.user.id, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
-  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community"].includes(b.kind) ? b.kind : "";
+  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community", "listing"].includes(b.kind) ? b.kind : "";
   if (!kind) return res.status(400).json({ error: "bad_kind" });
   db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created,evidence) VALUES(?,?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now(), kind === "msg" ? cleanText(b.evidence, 2000) : "");
   res.json({ ok: true });
@@ -740,6 +740,7 @@ app.post("/api/admin/reports", (req, res) => {
       else if (r.kind === "story") { const p = db.prepare("SELECT user_id, text, media FROM stories WHERE id=?").get(r.target); if (p) { o.preview = p.text; o.target_handle = hOf(p.user_id); o.media = mediaUrl(p.media); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "comment") { const p = db.prepare("SELECT user_id, text FROM comments WHERE id=?").get(r.target); if (p) { o.preview = p.text; o.target_handle = hOf(p.user_id); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "user") { o.target_handle = r.target; }
+      else if (r.kind === "listing") { const l = db.prepare("SELECT title, about, price, currency, user_id, image FROM listings WHERE id=?").get(r.target); if (l) { o.preview = l.title + " — " + (l.price >= 0 ? l.price + " " + l.currency : "fiyat sorulur") + "\n" + l.about; o.target_handle = hOf(l.user_id); o.media = mediaUrl(l.image); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "community") { const c = db.prepare("SELECT name, about, rules, owner FROM communities WHERE handle=?").get(r.target); if (c) { o.preview = c.name + " — " + c.about + (c.rules ? "\nKurallar: " + c.rules : ""); o.target_handle = hOf(c.owner); } else o.preview = "(silinmiş)"; }
     } catch (e) { /* önizleme isteğe bağlı */ }
     return o;
@@ -751,7 +752,7 @@ app.post("/api/admin/stats", (req, res) => {
   res.json({ users: db.prepare("SELECT COUNT(*) n FROM users").get().n, users7: c("SELECT COUNT(*) n FROM users WHERE created>?"), profiles: db.prepare("SELECT COUNT(*) n FROM profiles").get().n,
     posts: db.prepare("SELECT COUNT(*) n FROM posts").get().n, posts7: c("SELECT COUNT(*) n FROM posts WHERE created>?"), stories: db.prepare("SELECT COUNT(*) n FROM stories WHERE expires>?").get(now()).n,
     msgs: db.prepare("SELECT COUNT(*) n FROM msgs").get().n + db.prepare("SELECT COUNT(*) n FROM gmsgs").get().n, groups: db.prepare("SELECT COUNT(*) n FROM chat_groups").get().n,
-    communities: db.prepare("SELECT COUNT(*) n FROM communities").get().n, reports: db.prepare("SELECT COUNT(*) n FROM reports").get().n, bans: db.prepare("SELECT COUNT(*) n FROM bans").get().n, e2e_keys: db.prepare("SELECT COUNT(*) n FROM e2e_keys WHERE active=1").get().n });
+    communities: db.prepare("SELECT COUNT(*) n FROM communities").get().n, listings: db.prepare("SELECT COUNT(*) n FROM listings").get().n, reports: db.prepare("SELECT COUNT(*) n FROM reports").get().n, bans: db.prepare("SELECT COUNT(*) n FROM bans").get().n, e2e_keys: db.prepare("SELECT COUNT(*) n FROM e2e_keys WHERE active=1").get().n });
 });
 app.post("/api/admin/users", (req, res) => {
   if (!admOk(req, res)) return; const q = "%" + String((req.body || {}).q || "").replace(/[%_\\]/g, "").slice(0, 40) + "%";
@@ -769,6 +770,7 @@ app.post("/api/admin/remove", (req, res) => {
   if (b.post) { const pm = db.prepare("SELECT media, poster FROM posts WHERE id=?").get(String(b.post)); db.prepare("DELETE FROM posts WHERE id=?").run(String(b.post)); if (pm && pm.media) r2Del(pm.media); if (pm && pm.poster) r2Del(pm.poster); }
   if (b.story) { const sm = db.prepare("SELECT media FROM stories WHERE id=?").get(String(b.story)); db.prepare("DELETE FROM stories WHERE id=?").run(String(b.story)); if (sm && sm.media) r2Del(sm.media); }
   if (b.community) deleteCommunity(String(b.community).toLowerCase());
+  if (b.listing) { const lm = db.prepare("SELECT image FROM listings WHERE id=?").get(String(b.listing)); db.prepare("DELETE FROM listings WHERE id=?").run(String(b.listing)); if (lm && lm.image) r2Del(lm.image); }
   if (b.comment) db.prepare("DELETE FROM comments WHERE id=?").run(String(b.comment));
   if (b.msg) { const m = /^d:(\d{1,12})$/.exec(String(b.msg)), g = /^g:([A-Za-z0-9]{1,20}):(\d{1,12})$/.exec(String(b.msg)); let mm = null;
     if (m) { mm = db.prepare("SELECT media FROM msgs WHERE id=?").get(+m[1]); db.prepare("DELETE FROM msgs WHERE id=?").run(+m[1]); }
@@ -1161,7 +1163,7 @@ S("msg_delete", needProf, (req, res) => {
 function purgeUserMedia(uid) {
   const keys = new Set();
   for (const c of db.prepare("SELECT handle FROM communities WHERE owner=?").all(uid)) deleteCommunity(c.handle);
-  for (const q of ["SELECT media FROM scheduled WHERE user_id=?", "SELECT poster media FROM scheduled WHERE user_id=?", "SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
+  for (const q of ["SELECT image media FROM listings WHERE user_id=?", "SELECT media FROM scheduled WHERE user_id=?", "SELECT poster media FROM scheduled WHERE user_id=?", "SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
     for (const r of db.prepare(q).all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT media FROM msgs WHERE from_id=? OR to_id=?").all(uid, uid)) if (r.media) keys.add(r.media);
   for (const k of keys) r2Del(k);
@@ -1387,6 +1389,75 @@ S("creator_stats", needProf, (req, res) => {
   res.json({ days, followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(me).n, newFollowers: sum(S_.followers), likes: sum(S_.likes), comments: sum(S_.comments), views: sum(S_.views), posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=? AND created>?").get(me, since).n, series: S_, top, bestHours: best });
 });
 // ===== END STUDIO =====
+
+// ===== BEGIN SHOP =====
+// Vitrin: kullanıcıların ürün/hizmet ilanları. Ödeme aracılığı yok; alıcı ile satıcı sohbetten anlaşır.
+db.exec(`
+CREATE TABLE IF NOT EXISTS listings(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, about TEXT NOT NULL DEFAULT '', price REAL NOT NULL DEFAULT -1, currency TEXT NOT NULL DEFAULT 'TRY', category TEXT NOT NULL DEFAULT 'Diğer', city TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'product', image TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', created INTEGER NOT NULL, updated INTEGER NOT NULL, skey TEXT NOT NULL DEFAULT '', ckey TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS listings_u ON listings(user_id, created DESC);
+CREATE INDEX IF NOT EXISTS listings_c ON listings(status, category, created DESC);
+`);
+const nrm = t => String(t || "").toLocaleLowerCase("tr").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i");
+const SHOP_CATS = ["Moda", "Elektronik", "Ev ve yaşam", "Yiyecek", "Güzellik", "Eğitim", "Yazılım ve tasarım", "Hizmet", "El işi", "Diğer"], SHOP_CUR = ["TRY", "USD", "EUR"];
+const LST_SEL = "SELECT l.*, f.handle, f.avatar FROM listings l JOIN profiles f ON f.user_id=l.user_id";
+const LST_OK = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=l.user_id) OR (b.blocker=l.user_id AND b.blocked=?)) AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=l.user_id)";
+const lstOut = (r, me) => ({ id: r.id, title: r.title, about: r.about, price: r.price, currency: r.currency, category: r.category, city: r.city, kind: r.kind, image: mediaUrl(r.image), status: r.status, created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), own: r.user_id === me });
+function lstFields(b, uid, old) {
+  const title = cleanText(b.title, 80).replace(/\n/g, " "); if (!title) return { error: "bad_title" };
+  let price = -1; if (b.price !== undefined && b.price !== null && b.price !== "") { price = Math.round(+b.price * 100) / 100; if (!(price >= 0) || price > 1e9) return { error: "bad_price" }; }
+  const currency = SHOP_CUR.includes(b.currency) ? b.currency : "TRY", category = SHOP_CATS.includes(b.category) ? b.category : "Diğer", kind = b.kind === "service" ? "service" : "product";
+  let image = old ? old.image : "";
+  if (b.image !== undefined) { image = String(b.image || ""); if (image && (!image.startsWith("m/" + uid + "/") || !/\.(jpg|png|webp)$/.test(image) || image.length > 120)) return { error: "bad_media" }; if (image && !R2_ON) return { error: "storage_off" }; }
+  return { title, about: cleanText(b.about, 600), price, currency, category, city: cleanText(b.city, 30).replace(/\n/g, " "), kind, image };
+}
+S("l_new", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (!limit("lnew:" + me, 15, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (db.prepare("SELECT COUNT(*) n FROM listings WHERE user_id=? AND status='active'").get(me).n >= 30) return res.status(400).json({ error: "too_many_listings" });
+  const f = lstFields(b, me, null); if (f.error) return res.status(400).json({ error: f.error });
+  const id = "l" + rnd(8);
+  db.prepare("INSERT INTO listings(id,user_id,title,about,price,currency,category,city,kind,image,status,created,updated,skey,ckey) VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)").run(id, me, f.title, f.about, f.price, f.currency, f.category, f.city, f.kind, f.image, now(), now(), nrm(f.title + " " + f.about), nrm(f.city));
+  res.json({ ok: true, id });
+});
+S("l_edit", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, old = db.prepare("SELECT * FROM listings WHERE id=? AND user_id=?").get(String(b.id || ""), me);
+  if (!old) return res.status(404).json({ error: "not_found" });
+  const f = lstFields(b, me, old); if (f.error) return res.status(400).json({ error: f.error });
+  const status = b.status === "sold" ? "sold" : "active";
+  if (status === "active" && old.status === "sold" && db.prepare("SELECT COUNT(*) n FROM listings WHERE user_id=? AND status='active'").get(me).n >= 30) return res.status(400).json({ error: "too_many_listings" });
+  db.prepare("UPDATE listings SET title=?, about=?, price=?, currency=?, category=?, city=?, kind=?, image=?, status=?, updated=?, skey=?, ckey=? WHERE id=?").run(f.title, f.about, f.price, f.currency, f.category, f.city, f.kind, f.image, status, now(), nrm(f.title + " " + f.about), nrm(f.city), old.id);
+  if (old.image && old.image !== f.image) r2Del(old.image);
+  res.json({ ok: true });
+});
+S("l_del", needProf, (req, res) => {
+  const old = db.prepare("SELECT image FROM listings WHERE id=? AND user_id=?").get(String((req.body || {}).id || ""), req.user.id);
+  if (!old) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM listings WHERE id=?").run(String(req.body.id)); if (old.image) r2Del(old.image);
+  res.json({ ok: true });
+});
+S("l_get", needProf, (req, res) => {
+  const me = req.user.id, rows = db.prepare(`${LST_SEL} WHERE l.id=? ${LST_OK}`).all(String((req.body || {}).id || ""), me, me);
+  if (!rows.length) return res.status(404).json({ error: "not_found" });
+  res.json({ listing: lstOut(rows[0], me) });
+});
+S("l_user", needProf, (req, res) => {
+  const me = req.user.id, p = profByHandle((req.body || {}).handle); if (!p || isBanned(p.user_id) || blockedEither(me, p.user_id)) return res.status(404).json({ error: "no_user" });
+  const rows = db.prepare(`${LST_SEL} WHERE l.user_id=? ${p.user_id === me ? "" : "AND l.status IN ('active','sold')"} ORDER BY (l.status='active') DESC, l.created DESC LIMIT 60`).all(p.user_id);
+  res.json({ items: rows.map(r => lstOut(r, me)), handle: p.handle });
+});
+S("l_search", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, off = Math.max(0, Math.min(2000, +b.off || 0));
+  const w = ["l.status='active'"], args = [];
+  const q = nrm(String(b.q || "").replace(/[%_\\]/g, "").trim().slice(0, 40)); if (q) { w.push("l.skey LIKE ?"); args.push("%" + q + "%"); }
+  if (SHOP_CATS.includes(b.category)) { w.push("l.category=?"); args.push(b.category); }
+  const city = nrm(String(b.city || "").replace(/[%_\\]/g, "").trim().slice(0, 30)); if (city) { w.push("l.ckey LIKE ?"); args.push("%" + city + "%"); }
+  if (b.kind === "service" || b.kind === "product") { w.push("l.kind=?"); args.push(b.kind); }
+  const order = b.sort === "price_asc" ? "(l.price<0), l.price ASC, l.created DESC" : b.sort === "price_desc" ? "l.price DESC, l.created DESC" : "l.created DESC";
+  const rows = db.prepare(`${LST_SEL} WHERE ${w.join(" AND ")} ${LST_OK} ORDER BY ${order} LIMIT 21 OFFSET ${off}`).all(...args, me, me);
+  res.json({ items: rows.slice(0, 20).map(r => lstOut(r, me)), more: rows.length > 20, categories: SHOP_CATS });
+});
+// ===== END SHOP =====
+
 
 
 
