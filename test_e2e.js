@@ -49,7 +49,7 @@ mock.listen(0, () => {
       // --- ek: şifreli blob
       r = await call("/api/social/upload", { type: "image/png", size: 100 }, A); const pk = r.key; r = await call("/api/social/send", { handle: "bora", text: env, media: pk }, A); ok(r.s === 400, "plain media rejected in DM");
       r = await call("/api/social/upload", { type: "application/octet-stream", size: 3000 }, A); ok(r.s === 200 && r.key.endsWith(".enc"), "enc upload"); const ek = r.key;
-      r = await call("/api/social/upload", { type: "application/octet-stream", size: 90e6 }, A); ok(r.s === 413, "enc too large");
+      r = await call("/api/social/upload", { type: "application/octet-stream", size: 200e6 }, A); ok(r.s === 413, "enc too large");
       r = await call("/api/social/post", { kind: "photo", media: ek }, A); ok(r.s === 400, "enc media not allowed in public post");
       r = await call("/api/social/story_new", { kind: "photo", media: ek }, A); ok(r.s === 400, "enc media not allowed in story");
       r = await call("/api/social/send", { handle: "bora", text: env, media: ek }, A); ok(r.s === 200, "encrypted media DM");
