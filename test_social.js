@@ -20,6 +20,7 @@ server.listen(0, async () => {
     r = await call("/api/social/profile", { handle: "ali", bio: "merhaba <b>" }, A); ok(r.s === 200 && r.profile.handle === "ali", "create profile");
     r = await call("/api/social/profile", { handle: "ALI" }, B); ok(r.s === 409, "handle unique (case-insensitive)");
     await call("/api/social/profile", { handle: "bora" }, B); await call("/api/social/profile", { handle: "can_x" }, C);
+    const E = require("./e2e_help.js")(call); await E.key(A, "ali"); await E.key(B, "bora"); const m1 = E.env(B, "ali"), m2 = E.env(A, "bora");
     // paylaşım
     r = await call("/api/social/post", { kind: "text", text: "ilk gönderi" }, A); ok(r.s === 200 && r.id, "text post");
     const pid = r.id;
@@ -51,17 +52,17 @@ server.listen(0, async () => {
     r = await call("/api/social/user", { handle: "ali" }, B); ok(r.followers === 1 && r.posts === 3 && r.isFollowing && !r.self, "profile stats");
     r = await call("/api/social/search", { q: "al" }, B); ok(r.users.length === 1 && r.users[0].handle === "ali", "search");
     // mesaj
-    r = await call("/api/social/send", { handle: "ali", text: "selam" }, B); ok(r.s === 200, "send message");
-    r = await call("/api/social/send", { handle: "bora", text: "<img src=x onerror=1>" }, A); ok(r.s === 200, "reply");
+    r = await call("/api/social/send", { handle: "ali", text: m1 }, B); ok(r.s === 200, "send message");
+    r = await call("/api/social/send", { handle: "bora", text: m2 }, A); ok(r.s === 200, "reply");
     r = await call("/api/social/inbox", {}, A); ok(r.chats.length === 1 && r.chats[0].handle === "bora", "inbox");
-    r = await call("/api/social/thread", { handle: "bora" }, A); ok(r.msgs.length === 2 && r.msgs[0].text === "selam" && r.msgs[0].mine === false, "thread order and sides");
+    r = await call("/api/social/thread", { handle: "bora" }, A); ok(r.msgs.length === 2 && r.msgs[0].text === m1 && r.msgs[0].mine === false, "thread order and sides");
     r = await call("/api/social/inbox", {}, B); ok(r.chats[0].unread === 1, "unread count for recipient");
     r = await call("/api/social/thread", { handle: "ali" }, B); r = await call("/api/social/inbox", {}, B); ok(r.chats[0].unread === 0, "read after opening thread");
-    r = await call("/api/social/send", { handle: "ali", media: "m/baska/x.jpg" }, B); ok(r.s === 400, "foreign media in dm rejected");
-    r = await call("/api/social/send", { handle: "bora", text: "kendime" }, B); ok(r.s === 404, "cannot message self");
+    r = await call("/api/social/send", { handle: "ali", media: "m/baska/x.jpg", text: m1 }, B); ok(r.s === 400, "foreign media in dm rejected");
+    r = await call("/api/social/send", { handle: "bora", text: E.env(B, "bora") }, B); ok(r.s === 404, "cannot message self");
     // engel
     r = await call("/api/social/block", { handle: "bora", on: true }, A); ok(r.s === 200, "block");
-    r = await call("/api/social/send", { handle: "ali", text: "hey" }, B); ok(r.s === 404, "blocked user cannot message");
+    r = await call("/api/social/send", { handle: "ali", text: m1 }, B); ok(r.s === 404, "blocked user cannot message");
     r = await call("/api/social/feed", { mode: "all" }, B); ok(!r.posts.some(p => p.handle === "ali"), "blocked author hidden from blocked user's feed");
     r = await call("/api/social/feed", { mode: "all" }, A); ok(!r.posts.some(p => p.handle === "bora"), "and vice versa");
     r = await call("/api/social/like", { id: pid, on: true }, B); ok(r.s === 404, "cannot like blocked user's post");

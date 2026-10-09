@@ -16,6 +16,7 @@ mock.listen(0, () => {
       const reg = async (e, nm, h) => { const t = (await call("/api/register", { email: e, password: "parola-123", name: nm })).token; await call("/api/social/profile", { handle: h }, t); return t; };
       const A = await reg("a@x.com", "Ali", "ali"), B = await reg("b@x.com", "Bora", "bora"), C = await reg("c@x.com", "Can", "can_x"), D = await reg("d@x.com", "Deniz", "deniz");
       const up = async (tok, type, size) => (await call("/api/social/upload", { type, size }, tok));
+      const E = require("./e2e_help.js")(call); await E.key(A, "ali"); await E.key(B, "bora"); await E.key(C, "can_x"); await E.key(D, "deniz");
       // --- etiket + anma + bildirim
       let r = await call("/api/social/post", { kind: "text", text: "Merhaba #Pusula #ÇAY dünyası @bora ve @yok_kimse #a" }, A); ok(r.s === 200, "post with tags");
       const pid = r.id;
@@ -61,12 +62,12 @@ mock.listen(0, () => {
       await call("/api/social/delete", { id: r.id }, A); await new Promise(z => setTimeout(z, 100)); ok(dels.includes("/pusula-media/" + k2), "post delete removes media");
       // --- sesli / video mesaj
       r = await up(A, "audio/webm", 50000); ok(r.s === 200 && r.key.endsWith(".weba"), "audio upload type");
-      const ak = r.key; r = await call("/api/social/send", { handle: "bora", media: ak }, A); ok(r.s === 200, "voice message");
+      const ak = r.key; r = await call("/api/social/send", { handle: "bora", media: ak, text: E.env(A, "bora") }, A); ok(r.s === 400, "plain media rejected (e2e)"); r = await up(A, "application/octet-stream", 9000); const ek = r.key; ok(ek.endsWith(".enc"), "enc upload"); r = await call("/api/social/send", { handle: "bora", media: ek, text: E.env(A, "bora") }, A); ok(r.s === 200, "voice message");
       r = await up(A, "audio/webm", 7e6); ok(r.s === 413, "audio too large");
-      r = await up(A, "video/mp4", 5e6); const vk = r.key; r = await call("/api/social/send", { handle: "bora", media: vk, text: "klip" }, A); ok(r.s === 200, "video message in DM");
+      r = await up(A, "application/octet-stream", 5e6); const vk = r.key; const klip = E.env(A, "bora"); r = await call("/api/social/send", { handle: "bora", media: vk, text: klip }, A); ok(r.s === 200, "video message in DM");
       r = await call("/api/social/send", { handle: "bora", media: "m/x/y.exe" }, A); ok(r.s === 400, "bad media in DM");
       // --- tepki + yazıyor (birebir)
-      r = await call("/api/social/thread", { handle: "ali" }, B); ok(r.msgs.length === 2 && r.msgs[0].media.endsWith(".weba"), "thread shows voice media");
+      r = await call("/api/social/thread", { handle: "ali" }, B); ok(r.msgs.length === 2 && r.msgs[0].media.endsWith(".enc"), "thread shows encrypted media");
       const mid = r.msgs[0].id; r = await call("/api/social/react", { kind: "d", id: mid, emoji: "🔥" }, B); ok(r.re["🔥"] === 1 && r.my === "🔥", "react");
       r = await call("/api/social/react", { kind: "d", id: mid, emoji: "💩" }, B); ok(r.s === 400, "emoji whitelist");
       r = await call("/api/social/react", { kind: "d", id: mid, emoji: "👍" }, C); ok(r.s === 404, "stranger cannot react");
@@ -76,21 +77,21 @@ mock.listen(0, () => {
       r = await call("/api/social/thread", { handle: "bora" }, A); ok(r.typing === false, "typing not echoed");
       r = await call("/api/social/react", { kind: "d", id: mid, emoji: "" }, B); ok(r.my === "" && !r.re["🔥"], "remove reaction");
       // --- grup
-      r = await call("/api/social/gcreate", { name: "Ekip", members: ["bora", "@can_x", "yok_yok", "ali"] }, A); ok(r.s === 200 && r.id, "group create"); const gid = r.id;
+      r = await call("/api/social/gcreate", { name: "Ekip", members: ["bora", "@can_x", "yok_yok", "ali"] }, A); ok(r.s === 200 && r.id, "group create"); const gid = r.id; r = await E.gkeys(A, gid, [{ tok: A, handle: "ali" }, { tok: B, handle: "bora" }, { tok: C, handle: "can_x" }], 1); ok(r.s === 200 && r.count === 3, "group key epoch 1");
       r = await call("/api/social/gcreate", { name: "Boş", members: ["yok_yok"] }, A); ok(r.s === 400, "group needs members");
       r = await call("/api/social/gcreate", { name: "", members: ["bora"] }, A); ok(r.s === 400, "group needs name");
-      r = await call("/api/social/gsend", { id: gid, text: "selam ekip" }, A); ok(r.s === 200, "group send");
+      r = await call("/api/social/gsend", { id: gid, text: E.genv(1) }, A); ok(r.s === 200, "group send");
       r = await call("/api/social/gsend", { id: gid, text: "hey" }, D); ok(r.s === 404, "non-member cannot send");
       r = await call("/api/social/gthread", { id: gid }, D); ok(r.s === 404, "non-member cannot read");
       r = await call("/api/social/chats", {}, B); const gc = r.chats.find(c => c.type === "group"); ok(gc && gc.name === "Ekip" && gc.unread === 1 && gc.members === 3 && gc.from === "ali", "chats lists group with unread");
-      ok(r.chats.some(c => c.type === "dm" && c.handle === "ali" && c.text === "klip"), "chats lists dm with last text");
+      ok(r.chats.some(c => c.type === "dm" && c.handle === "ali" && c.text === klip), "chats lists dm with last text");
       r = await call("/api/social/gthread", { id: gid }, B); ok(r.msgs.length === 1 && r.msgs[0].handle === "ali" && !r.msgs[0].mine && r.members.length === 3 && r.name === "Ekip", "group thread");
       r = await call("/api/social/chats", {}, B); ok(r.chats.find(c => c.type === "group").unread === 0, "group read marks unread 0");
       const gm = (await call("/api/social/gthread", { id: gid }, C)).msgs[0].id;
       r = await call("/api/social/react", { kind: "g", id: gm, emoji: "❤️" }, C); ok(r.re["❤️"] === 1, "group react");
       r = await call("/api/social/react", { kind: "g", id: gm, emoji: "❤️" }, D); ok(r.s === 404, "non-member cannot react in group");
       await call("/api/social/typing", { group: gid }, C); r = await call("/api/social/gthread", { id: gid }, B); ok(r.typing.join() === "can_x", "group typing");
-      r = await up(B, "audio/webm", 2000); r = await call("/api/social/gsend", { id: gid, media: r.key }, B); ok(r.s === 200, "group voice");
+      r = await up(B, "application/octet-stream", 2000); r = await call("/api/social/gsend", { id: gid, media: r.key, text: E.genv(1) }, B); ok(r.s === 200, "group voice");
       r = await call("/api/social/gadd", { id: gid, handle: "deniz" }, B); ok(r.s === 404, "only owner adds");
       r = await call("/api/social/gadd", { id: gid, handle: "deniz" }, A); ok(r.s === 200, "owner adds member");
       r = await call("/api/social/gthread", { id: gid }, D); ok(r.s === 200 && r.members.length === 4, "added member reads");

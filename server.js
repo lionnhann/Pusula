@@ -223,7 +223,7 @@ function auth(req, res, next) {
 }
 const wrap = f => f;
 
-app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, backup: bkStatus }));
+app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus }));
 
 app.post("/api/register", wrap(async (req, res) => {
   if (!limit("reg:" + req.ip, 10, 3600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -441,7 +441,7 @@ CREATE TABLE IF NOT EXISTS msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, from_id TE
 CREATE INDEX IF NOT EXISTS msgs_pair ON msgs(from_id, to_id, id);
 CREATE INDEX IF NOT EXISTS msgs_to ON msgs(to_id, read);
 CREATE TABLE IF NOT EXISTS blocks(blocker TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, blocked TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY(blocker, blocked));
-CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, reporter TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, reporter TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, evidence TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS bans(user_id TEXT PRIMARY KEY, reason TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
 `);
 const R2 = { acct: process.env.R2_ACCOUNT_ID || "", key: process.env.R2_ACCESS_KEY_ID || "", sec: process.env.R2_SECRET_ACCESS_KEY || "", bucket: process.env.R2_BUCKET || "", pub: String(process.env.R2_PUBLIC_URL || "").replace(/\/+$/, ""), host: process.env.R2_ENDPOINT_HOST || "" };
@@ -459,7 +459,7 @@ function sigV4Presign({ method, host, pathName, keyId, secret, region, service, 
   const kd = hmac(hmac(hmac(hmac("AWS4" + secret, day), region), service), "aws4_request");
   return { query: cq + "&X-Amz-Signature=" + hmac(kd, sts).toString("hex"), signature: hmac(kd, sts).toString("hex") };
 }
-const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/webm": "weba", "audio/mp4": "m4a", "audio/ogg": "ogg" };
+const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/webm": "weba", "audio/mp4": "m4a", "audio/ogg": "ogg", "application/octet-stream": "enc" };
 const MAX_IMG = 4 * 1024 * 1024, MAX_VID = +process.env.MAX_VIDEO_BYTES || 40 * 1024 * 1024;
 const mediaUrl = k => k && R2_ON ? R2.pub + "/" + k : "";
 const HANDLE_RE = /^[a-z0-9_.]{3,20}$/i;
@@ -509,7 +509,7 @@ S("upload", needProf, (req, res) => {
   if (!limit("sup:" + req.user.id, 40, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
   const type = String((req.body || {}).type || "").toLowerCase(), size = Math.floor(+(req.body || {}).size || 0), ext = MEDIA_EXT[type];
   if (!ext) return res.status(400).json({ error: "bad_type" });
-  const vid = type.startsWith("video/"), lim = vid ? MAX_VID : type.startsWith("audio/") ? 6 * 1024 * 1024 : MAX_IMG;
+  const vid = type.startsWith("video/"), lim = type === "application/octet-stream" ? MAX_VID + 1024 : vid ? MAX_VID : type.startsWith("audio/") ? 6 * 1024 * 1024 : MAX_IMG;
   if (size <= 0 || size > lim) return res.status(413).json({ error: "too_large", max: lim });
   const key = "m/" + req.user.id + "/" + rnd(12) + "." + ext;
   const sg = sigV4Presign({ method: "PUT", host: R2.host, pathName: "/" + R2.bucket + "/" + key, keyId: R2.key, secret: R2.sec, region: "auto", service: "s3", date: new Date().toISOString(), expires: 600 });
@@ -617,11 +617,11 @@ S("report", needProf, (req, res) => {
   if (!limit("srep:" + req.user.id, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
   const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group"].includes(b.kind) ? b.kind : "";
   if (!kind) return res.status(400).json({ error: "bad_kind" });
-  db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created) VALUES(?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now());
+  db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created,evidence) VALUES(?,?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now(), kind === "msg" ? cleanText(b.evidence, 2000) : "");
   res.json({ ok: true });
 });
 
-// Mesajlaşma (sunucu tarafında okunabilir; uçtan uca şifreli değil)
+// Mesajlaşma: uçtan uca şifreli (sunucu yalnızca şifreli metin görür)
 S("inbox", needProf, (req, res) => {
   const me = req.user.id;
   const rows = db.prepare(`SELECT m.id, m.from_id, m.to_id, m.text, m.media, m.created FROM msgs m WHERE m.id IN (SELECT MAX(id) FROM msgs WHERE from_id=? OR to_id=? GROUP BY CASE WHEN from_id=? THEN to_id ELSE from_id END) ORDER BY m.id DESC LIMIT 50`).all(me, me, me);
@@ -643,11 +643,15 @@ S("thread", needProf, (req, res) => {
   res.json({ msgs: rows.map(r => withRe({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created }, rm)), handle: p.handle, avatar: mediaUrl(p.avatar), typing: typing("d:" + p.user_id + ":" + me) });
 });
 S("send", needProf, (req, res) => {
-  const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle), text = cleanText(b.text, 1000), media = String(b.media || "");
+  const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle), text = String(b.text || ""), media = String(b.media || "");
   if (!limit("smsg:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
   if (!p || p.user_id === me || blockedEither(me, p.user_id) || isBanned(p.user_id)) return res.status(404).json({ error: "not_found" });
   if (media && (!R2_ON || !media.startsWith("m/" + me + "/") || !MSG_MEDIA_RE.test(media) || media.length > 120)) return res.status(400).json({ error: "bad_media" });
-  if (!text && !media) return res.status(400).json({ error: "empty" });
+  const em = E2E_DM_RE.exec(text); if (!em || (media && !media.endsWith(".enc"))) return res.status(400).json({ error: "e2e_required" });
+  const mk = e2eActive(me), pk = e2eActive(p.user_id);
+  if (!mk) return res.status(409).json({ error: "no_key" });
+  if (!pk) return res.status(409).json({ error: "peer_no_key" });
+  if (em[1] !== mk.fp || em[2] !== pk.fp) return res.status(409).json({ error: "key_changed" });
   const r = db.prepare("INSERT INTO msgs(from_id,to_id,text,media,created) VALUES(?,?,?,?,?)").run(me, p.user_id, text, media, now());
   res.json({ ok: true, id: Number(r.lastInsertRowid) });
 });
@@ -689,7 +693,7 @@ CREATE TABLE IF NOT EXISTS gmsgs(id INTEGER PRIMARY KEY AUTOINCREMENT, group_id 
 CREATE INDEX IF NOT EXISTS gmsgs_g ON gmsgs(group_id, id);
 CREATE TABLE IF NOT EXISTS reacts(kind TEXT NOT NULL, msg_id INTEGER NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, emoji TEXT NOT NULL, PRIMARY KEY(kind, msg_id, user_id));
 `);
-const MSG_MEDIA_RE = /\.(jpg|png|webp|mp4|webm|mov|weba|m4a|ogg)$/;
+const MSG_MEDIA_RE = /\.(jpg|png|webp|mp4|webm|mov|weba|m4a|ogg|enc)$/;
 const EMOJIS = ["❤️", "😂", "😮", "😢", "👍", "🔥"];
 const STORY_MS = 24 * 3600e3;
 const R2_BASE = (process.env.R2_ENDPOINT_BASE || (R2.host ? "https://" + R2.host : "")).replace(/\/+$/, "");
@@ -725,7 +729,7 @@ function purge() {
 }
 setInterval(purge, 10 * 60e3).unref();
 const visible = (me, owner) => owner === me || (!blockedEither(me, owner) && !isBanned(owner));
-const mediaLabel = m => /\.(weba|m4a|ogg)$/.test(m) ? "🎤 Sesli mesaj" : /\.(mp4|webm|mov)$/.test(m) ? "🎬 Video" : "📷 Fotoğraf";
+const mediaLabel = m => /\.enc$/.test(m) ? "🔒 Şifreli ek" : /\.(weba|m4a|ogg)$/.test(m) ? "🎤 Sesli mesaj" : /\.(mp4|webm|mov)$/.test(m) ? "🎬 Video" : "📷 Fotoğraf";
 function reactMap(kind, ids, me) {
   const out = new Map(); if (!ids.length) return out;
   for (const r of db.prepare(`SELECT msg_id, user_id, emoji FROM reacts WHERE kind=? AND msg_id IN (${ids.map(() => "?").join(",")})`).all(kind, ...ids)) {
@@ -865,6 +869,9 @@ S("gcreate", needProf, (req, res) => {
   for (const h of (Array.isArray(b.members) ? b.members : []).slice(0, 30)) { const p = profByHandle(String(h || "").replace(/^@/, "")); if (p && p.user_id !== me && visible(me, p.user_id)) ids.add(p.user_id); }
   if (!ids.size) return res.status(400).json({ error: "no_members" });
   if (ids.size > 19) return res.status(400).json({ error: "too_many" });
+  if (!e2eActive(me)) return res.status(409).json({ error: "no_key" });
+  const nk = [...ids].filter(u => !e2eActive(u)).map(u => (profOf(u) || {}).handle).filter(Boolean);
+  if (nk.length) return res.status(409).json({ error: "peer_no_key", handles: nk });
   const id = "g" + rnd(8);
   db.prepare("INSERT INTO chat_groups(id,name,owner,created) VALUES(?,?,?,?)").run(id, name, me, now());
   for (const u of [me, ...ids]) db.prepare("INSERT INTO group_members(group_id,user_id,last_read) VALUES(?,?,0)").run(id, u);
@@ -882,11 +889,14 @@ S("gthread", needProf, (req, res) => {
     msgs: rows.map(r => withRe({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created }, rm)) });
 });
 S("gsend", needProf, (req, res) => {
-  const me = req.user.id, b = req.body || {}, gid = String(b.id || ""), text = cleanText(b.text, 1000), media = String(b.media || "");
+  const me = req.user.id, b = req.body || {}, gid = String(b.id || ""), text = String(b.text || ""), media = String(b.media || "");
   if (!isMember(gid, me)) return res.status(404).json({ error: "not_found" });
   if (!limit("sgmsg:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
   if (media && (!R2_ON || !media.startsWith("m/" + me + "/") || !MSG_MEDIA_RE.test(media) || media.length > 120)) return res.status(400).json({ error: "bad_media" });
-  if (!text && !media) return res.status(400).json({ error: "empty" });
+  const gm = E2E_G_RE.exec(text); if (!gm || (media && !media.endsWith(".enc"))) return res.status(400).json({ error: "e2e_required" });
+  if (!e2eActive(me)) return res.status(409).json({ error: "no_key" });
+  const curEp = db.prepare("SELECT MAX(epoch) e FROM group_epochs WHERE group_id=?").get(gid).e || 0;
+  if (+gm[1] < 1 || +gm[1] > curEp) return res.status(409).json({ error: "bad_epoch" });
   const r = db.prepare("INSERT INTO gmsgs(group_id,from_id,text,media,created) VALUES(?,?,?,?,?)").run(gid, me, text, media, now());
   db.prepare("UPDATE group_members SET last_read=? WHERE group_id=? AND user_id=?").run(Number(r.lastInsertRowid), gid, me);
   res.json({ ok: true, id: Number(r.lastInsertRowid) });
@@ -897,6 +907,7 @@ S("gadd", needProf, (req, res) => {
   const p = profByHandle(String((req.body || {}).handle || "").replace(/^@/, ""));
   if (!p || !visible(me, p.user_id)) return res.status(404).json({ error: "no_user" });
   if (db.prepare("SELECT COUNT(*) n FROM group_members WHERE group_id=?").get(gid).n >= 20) return res.status(400).json({ error: "too_many" });
+  if (!e2eActive(p.user_id)) return res.status(409).json({ error: "peer_no_key", handles: [p.handle] });
   db.prepare("INSERT OR IGNORE INTO group_members(group_id,user_id,last_read) VALUES(?,?,0)").run(gid, p.user_id); res.json({ ok: true });
 });
 S("gleave", needProf, (req, res) => {
@@ -908,6 +919,91 @@ S("gleave", needProf, (req, res) => {
   res.json({ ok: true });
 });
 // ===== END SOCIAL2 =====
+
+// ===== BEGIN E2E =====
+// Uçtan uca şifreleme: sunucu yalnızca açık anahtarları ve şifreli metni/ekleri görür. Özel anahtar yalnızca cihazdadır.
+db.exec(`
+CREATE TABLE IF NOT EXISTS e2e_keys(user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, fp TEXT NOT NULL, pub TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL, PRIMARY KEY(user_id, fp));
+CREATE TABLE IF NOT EXISTS group_epochs(group_id TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE, epoch INTEGER NOT NULL, creator TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(group_id, epoch));
+CREATE TABLE IF NOT EXISTS group_keys(group_id TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE, epoch INTEGER NOT NULL, user_id TEXT NOT NULL, to_fp TEXT NOT NULL, wrapped TEXT NOT NULL, by_user TEXT NOT NULL, by_fp TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(group_id, epoch, user_id, to_fp));
+`);
+const E2E_DM_RE = /^e2e1:([0-9a-f]{16})\.([0-9a-f]{16}):([A-Za-z0-9_-]{24,14000})$/;
+const E2E_G_RE = /^e2e1:g([0-9]{1,6}):([A-Za-z0-9_-]{24,14000})$/;
+const B64U = /^[A-Za-z0-9_-]+$/;
+const e2eActive = uid => db.prepare("SELECT fp, pub FROM e2e_keys WHERE user_id=? AND active=1").get(uid);
+function e2ePubOk(b64) {
+  try {
+    const raw = Buffer.from(String(b64 || ""), "base64url");
+    if (raw.length !== 65 || raw[0] !== 4) return null;
+    const e = crypto.createECDH("prime256v1"); e.generateKeys(); e.computeSecret(raw); // geçersiz noktada hata verir
+    return { raw, fp: crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16) };
+  } catch (e) { return null; }
+}
+S("e2e_set", needProf, (req, res) => {
+  if (!limit("se2e:" + req.user.id, 10, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const k = e2ePubOk((req.body || {}).pub);
+  if (!k) return res.status(400).json({ error: "bad_key" });
+  const me = req.user.id, pub = k.raw.toString("base64url");
+  db.prepare("UPDATE e2e_keys SET active=0 WHERE user_id=?").run(me);
+  const ex = db.prepare("SELECT 1 FROM e2e_keys WHERE user_id=? AND fp=?").get(me, k.fp);
+  if (ex) db.prepare("UPDATE e2e_keys SET active=1 WHERE user_id=? AND fp=?").run(me, k.fp);
+  else db.prepare("INSERT INTO e2e_keys(user_id,fp,pub,active,created) VALUES(?,?,?,1,?)").run(me, k.fp, pub, now());
+  res.json({ ok: true, fp: k.fp });
+});
+S("e2e_get", needProf, (req, res) => {
+  if (!limit("se2eg:" + req.user.id, 600, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const me = req.user.id, p = profByHandle(String((req.body || {}).handle || "").replace(/^@/, ""));
+  if (!p || (p.user_id !== me && (blockedEither(me, p.user_id) || isBanned(p.user_id)))) return res.status(404).json({ error: "not_found" });
+  res.json({ keys: db.prepare("SELECT fp, pub, active FROM e2e_keys WHERE user_id=? ORDER BY created DESC LIMIT 10").all(p.user_id) });
+});
+S("gkeys", needProf, (req, res) => {
+  const me = req.user.id, gid = String((req.body || {}).id || "");
+  if (!isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+  const cur = db.prepare("SELECT MAX(epoch) e FROM group_epochs WHERE group_id=?").get(gid).e || 0;
+  const keys = db.prepare("SELECT k.epoch, k.wrapped, k.by_fp, k.to_fp, f.handle by FROM group_keys k JOIN profiles f ON f.user_id=k.by_user WHERE k.group_id=? AND k.user_id=? ORDER BY k.epoch").all(gid, me);
+  const mem = db.prepare("SELECT m.user_id, f.handle, e.fp, e.pub FROM group_members m JOIN profiles f ON f.user_id=m.user_id LEFT JOIN e2e_keys e ON e.user_id=m.user_id AND e.active=1 WHERE m.group_id=?").all(gid);
+  const have = new Set(db.prepare("SELECT user_id||':'||to_fp x FROM group_keys WHERE group_id=? AND epoch=?").all(gid, cur).map(r => r.x));
+  const rotate = !!db.prepare("SELECT 1 FROM group_keys k WHERE k.group_id=? AND k.epoch=? AND NOT EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=k.group_id AND m.user_id=k.user_id)").get(gid, cur);
+  res.json({ epoch: cur, keys, rotate, members: mem.map(m => ({ handle: m.handle, fp: m.fp || "", pub: m.pub || "", have: !!m.fp && have.has(m.user_id + ":" + m.fp) })) });
+});
+S("gkeys_put", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, gid = String(b.id || ""), ep = Math.floor(+b.epoch || 0), items = Array.isArray(b.items) ? b.items.slice(0, 20) : [];
+  if (!isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+  if (!limit("sgk:" + me, 120, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const mk = e2eActive(me); if (!mk) return res.status(409).json({ error: "no_key" });
+  const cur = db.prepare("SELECT MAX(epoch) e FROM group_epochs WHERE group_id=?").get(gid).e || 0;
+  if (ep === cur + 1) {
+    const r = db.prepare("INSERT OR IGNORE INTO group_epochs(group_id,epoch,creator,created) VALUES(?,?,?,?)").run(gid, ep, me, now());
+    if (!r.changes) return res.status(409).json({ error: "epoch_exists" });
+  } else if (ep === cur && ep > 0) {
+    if (!db.prepare("SELECT 1 FROM group_keys WHERE group_id=? AND epoch=? AND user_id=?").get(gid, ep, me)) return res.status(403).json({ error: "no_group_key" });
+  } else return res.status(400).json({ error: "bad_epoch" });
+  let n = 0;
+  for (const it of items) {
+    const p = profByHandle(String((it || {}).handle || "").replace(/^@/, "")), w = String((it || {}).wrapped || "");
+    if (!p || !isMember(gid, p.user_id) || !B64U.test(w) || w.length < 24 || w.length > 400) continue;
+    const tk = e2eActive(p.user_id); if (!tk || tk.fp !== String(it.to_fp || "")) continue;
+    n += db.prepare("INSERT OR IGNORE INTO group_keys(group_id,epoch,user_id,to_fp,wrapped,by_user,by_fp,created) VALUES(?,?,?,?,?,?,?,?)").run(gid, ep, p.user_id, tk.fp, w, me, mk.fp, now()).changes;
+  }
+  res.json({ ok: true, epoch: ep, count: n });
+});
+// Şifreli ek: R2 CORS izin vermezse istemci buradan indirir (sunucu yalnızca şifreli baytları aktarır)
+S("e2e_blob", needProf, async (req, res) => {
+  const me = req.user.id, key = String((req.body || {}).key || "");
+  if (!R2_ON || !/^m\/[A-Za-z0-9_-]{1,40}\/[0-9a-f]{24}\.enc$/.test(key)) return res.status(400).json({ error: "bad_media" });
+  if (!limit("sblob:" + me, 300, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const ok = db.prepare("SELECT 1 FROM msgs WHERE media=? AND (from_id=? OR to_id=?)").get(key, me, me) || db.prepare("SELECT 1 FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id WHERE x.media=? AND m.user_id=?").get(key, me);
+  if (!ok) return res.status(404).json({ error: "not_found" });
+  try {
+    const r = await fetch(R2.pub + "/" + key, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) return res.status(404).json({ error: "not_found" });
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > MAX_VID + 1024) return res.status(413).json({ error: "too_large" });
+    res.setHeader("Content-Type", "application/octet-stream"); res.setHeader("Cache-Control", "private, max-age=3600"); res.end(buf);
+  } catch (e) { res.status(502).json({ error: "storage_error" }); }
+});
+// ===== END E2E =====
+
 
 // Uygulamanın kendisini de sun (aynı adres, ek ayar gerekmez)
 // ===== BEGIN GOOGLE =====
