@@ -1,7 +1,7 @@
 // Pusula Medya 2 testi: hikâye, bildirim, etiket, keşfet, grup, tepki, yazıyor, sesli mesaj, depolama temizliği. node test_social2.js
 const assert = require("assert"), http = require("http");
 process.env.DB_PATH = require("path").join(require("os").tmpdir(), "pusula-soc2-" + process.pid + ".db");
-process.env.TRUST_PROXY = "0"; process.env.REQUIRE_VERIFY = "0";
+process.env.TRUST_PROXY = "0"; process.env.REQUIRE_VERIFY = "0"; process.env.MEDIA_PROXY = "0";
 process.env.R2_ACCOUNT_ID = "acct123"; process.env.R2_ACCESS_KEY_ID = "AKTEST"; process.env.R2_SECRET_ACCESS_KEY = "SECRETTEST"; process.env.R2_BUCKET = "pusula-media"; process.env.R2_PUBLIC_URL = "https://pub.example.dev";
 const dels = [];
 const mock = http.createServer((req, res) => { if (req.method === "DELETE") dels.push(new URL(req.url, "http://x").pathname); res.statusCode = 204; res.end(); });

@@ -1,7 +1,7 @@
 // Sosyal özellikler testi: profil, paylaşım, takip, akış, beğeni, yorum, mesaj, engel, şikâyet, yükleme imzası. node test_social.js
 const assert = require("assert");
 process.env.DB_PATH = require("path").join(require("os").tmpdir(), "pusula-soc-" + process.pid + ".db");
-process.env.TRUST_PROXY = "0"; process.env.REQUIRE_VERIFY = "0"; process.env.ADMIN_TOKEN = "adm-secret";
+process.env.TRUST_PROXY = "0"; process.env.REQUIRE_VERIFY = "0"; process.env.MEDIA_PROXY = "0"; process.env.ADMIN_TOKEN = "adm-secret";
 process.env.R2_ACCOUNT_ID = "acct123"; process.env.R2_ACCESS_KEY_ID = "AKTEST"; process.env.R2_SECRET_ACCESS_KEY = "SECRETTEST"; process.env.R2_BUCKET = "pusula-media"; process.env.R2_PUBLIC_URL = "https://pub.example.dev";
 const { server, sigV4Presign } = require("./server.js");
 let n = 0; const ok = (c, m) => { assert(c, m); n++; };

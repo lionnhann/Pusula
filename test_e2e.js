@@ -5,7 +5,11 @@ process.env.TRUST_PROXY = "0"; process.env.REQUIRE_VERIFY = "0"; process.env.ADM
 process.env.R2_ACCOUNT_ID = "acct123"; process.env.R2_ACCESS_KEY_ID = "AKTEST"; process.env.R2_SECRET_ACCESS_KEY = "SECRETTEST"; process.env.R2_BUCKET = "pusula-media";
 let n = 0; const ok = (c, m) => { assert(c, m); n++; };
 const BLOB = crypto.randomBytes(3000);
-const mock = http.createServer((req, res) => { if (req.method === "GET") { res.statusCode = 200; return res.end(BLOB); } res.statusCode = 204; res.end(); });
+const puts = {}; const mock = http.createServer(async (req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  if (req.method === "GET") { res.statusCode = 200; res.setHeader("Content-Type", "text/html"); return res.end(puts[p.replace(/^\/pusula-media/, "")] || BLOB); }
+  if (req.method === "PUT") { const ch = []; for await (const c of req) ch.push(c); puts[p.replace(/^\/pusula-media/, "")] = Buffer.concat(ch); puts.__ct = req.headers["content-type"]; res.statusCode = 200; return res.end(); }
+  res.statusCode = 204; res.end(); });
 mock.listen(0, () => {
   process.env.R2_ENDPOINT_BASE = "http://127.0.0.1:" + mock.address().port; process.env.R2_PUBLIC_URL = "http://127.0.0.1:" + mock.address().port;
   const { server } = require("./server.js");
@@ -88,6 +92,24 @@ mock.listen(0, () => {
       // --- şikâyet kanıtı
       r = await call("/api/social/report", { kind: "msg", target: "1", reason: "taciz", evidence: "kötü bir mesaj" }, B); ok(r.s === 200, "report msg with evidence");
       const ar = await (await fetch(base + "/api/admin/reports", { method: "POST", headers: { "x-admin-token": "adm-test-token-123456", "Content-Type": "application/json" }, body: "{}" })).json(); ok(ar.reports.some(x => x.kind === "msg" && x.evidence === "kötü bir mesaj"), "admin sees evidence");
+      // --- görsel/ek vekili (telefon operatörü r2.dev'i engelleyebiliyor)
+      r = await call("/api/social/thread", { handle: "ali" }, B); const mm = r.msgs.find(m => m.media); ok(mm && mm.media.startsWith("/media/m/") && mm.media.endsWith(".enc"), "media served via own server path");
+      let pr = await fetch(base + mm.media); ok(pr.status === 200 && Buffer.from(await pr.arrayBuffer()).equals(BLOB), "proxy returns bytes");
+      ok(pr.headers.get("content-type") === "application/octet-stream" && /sandbox/.test(pr.headers.get("content-security-policy")) && /immutable/.test(pr.headers.get("cache-control")), "proxy forces type, sandboxes, caches");
+      r = await call("/api/social/upload", { type: "image/jpeg", size: 100 }, A); const jk = r.key;
+      pr = await fetch(base + "/media/" + jk); ok(pr.status === 200 && pr.headers.get("content-type") === "image/jpeg", "html content-type from storage is overridden by extension");
+      pr = await fetch(base + "/media/m/x/../../etc.jpg"); ok(pr.status === 404, "bad media path rejected");
+      pr = await fetch(base + "/media/m/abc/" + "0".repeat(24) + ".html"); ok(pr.status === 404, "bad extension rejected");
+      // sunucu üzerinden yükleme (doğrudan R2'ye ulaşılamayan ağlar için)
+      const up = (key, tok, body) => fetch(base + "/media-up?key=" + encodeURIComponent(key), { method: "PUT", headers: Object.assign({ "Content-Type": "image/jpeg" }, tok ? { Authorization: "Bearer " + tok } : {}), body });
+      r = await call("/api/social/upload", { type: "image/jpeg", size: 6 }, A); const uk = r.key;
+      pr = await up(uk, null, Buffer.from("abcdef")); ok(pr.status === 401, "upload needs auth");
+      pr = await up(uk, B, Buffer.from("abcdef")); ok(pr.status === 400, "other user cannot use my key");
+      pr = await up("m/" + "x".repeat(5) + "/" + "1".repeat(24) + ".jpg", A, Buffer.from("abcdef")); ok(pr.status === 400, "unissued key rejected");
+      pr = await up(uk, A, Buffer.from("abcdefghij")); ok(pr.status === 413, "oversize rejected");
+      r = await call("/api/social/upload", { type: "image/jpeg", size: 6 }, A); const uk2 = r.key;
+      pr = await up(uk2, A, Buffer.from("abcdef")); ok(pr.status === 200 && puts["/" + uk2] && puts["/" + uk2].toString() === "abcdef" && puts.__ct === "image/jpeg", "upload relayed to storage with issued type");
+      pr = await up(uk2, A, Buffer.from("abcdef")); ok(pr.status === 400, "key is single-use");
       console.log("OK " + n + " kontrol");
     } catch (e) { console.error("FAIL", e.message, "\n", e.stack.split("\n").slice(0, 3).join("\n")); process.exitCode = 1; }
     server.close(); mock.close(); setTimeout(() => process.exit(process.exitCode || 0), 100);

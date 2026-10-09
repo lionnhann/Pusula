@@ -174,6 +174,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
   const url = new URL(req.url, "http://x"), pathname = url.pathname;
   try {
+    if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/media/")) return serveMedia(req, res, pathname.slice(7));
+    if (req.method === "PUT" && pathname === "/media-up") return mediaUp(req, res, url);
     if (pathname.startsWith("/api/")) {
       if (!limit("ip:" + req.ip, 240, 60000)) return res.json({ error: "rate_limited" }, 429);
       const r = routes.find(x => x.method === req.method && x.p === pathname);
@@ -461,7 +463,9 @@ function sigV4Presign({ method, host, pathName, keyId, secret, region, service, 
 }
 const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/webm": "weba", "audio/mp4": "m4a", "audio/ogg": "ogg", "application/octet-stream": "enc" };
 const MAX_IMG = 4 * 1024 * 1024, MAX_VID = +process.env.MAX_VIDEO_BYTES || 40 * 1024 * 1024;
-const mediaUrl = k => k && R2_ON ? R2.pub + "/" + k : "";
+// Görseller varsayılan olarak kendi sunucumuzdan sunulur (bazı operatörler r2.dev adresine SSL ile bağlanmayı engelliyor). MEDIA_PROXY=0 ile doğrudan R2 adresi kullanılır.
+const MEDIA_PROXY = process.env.MEDIA_PROXY !== "0";
+const mediaUrl = k => k && R2_ON ? (MEDIA_PROXY ? "/media/" + k : R2.pub + "/" + k) : "";
 const HANDLE_RE = /^[a-z0-9_.]{3,20}$/i;
 const cleanText = (s, n) => String(s == null ? "" : s).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f‪-‮⁦-⁩]/g, "").replace(/\r\n?/g, "\n").trim().slice(0, n);
 const profOf = uid => db.prepare("SELECT user_id, handle, bio, avatar FROM profiles WHERE user_id=?").get(uid);
@@ -512,6 +516,8 @@ S("upload", needProf, (req, res) => {
   const vid = type.startsWith("video/"), lim = type === "application/octet-stream" ? MAX_VID + 1024 : vid ? MAX_VID : type.startsWith("audio/") ? 6 * 1024 * 1024 : MAX_IMG;
   if (size <= 0 || size > lim) return res.status(413).json({ error: "too_large", max: lim });
   const key = "m/" + req.user.id + "/" + rnd(12) + "." + ext;
+  if (ISSUED.size > 500) for (const [k, v] of ISSUED) if (v.exp < Date.now()) ISSUED.delete(k);
+  ISSUED.set(key, { uid: req.user.id, type, size, exp: Date.now() + 600e3 });
   const sg = sigV4Presign({ method: "PUT", host: R2.host, pathName: "/" + R2.bucket + "/" + key, keyId: R2.key, secret: R2.sec, region: "auto", service: "s3", date: new Date().toISOString(), expires: 600 });
   res.json({ key, url: "https://" + R2.host + "/" + R2.bucket + "/" + key + "?" + sg.query, type });
 });
@@ -1003,6 +1009,52 @@ S("e2e_blob", needProf, async (req, res) => {
   } catch (e) { res.status(502).json({ error: "storage_error" }); }
 });
 // ===== END E2E =====
+
+// ===== BEGIN MEDIA PROXY =====
+// Görsel/video/ses: telefon operatörü r2.dev ya da R2 yükleme adresine ulaşamasa da uygulama yalnızca bu sunucuyla konuşur.
+const ISSUED = new Map(); // upload ile verilmiş anahtarlar: key -> { uid, type, size, exp }
+const MEDIA_KEY_RE = /^m\/[A-Za-z0-9_-]{1,40}\/[0-9a-f]{24}\.(jpg|png|webp|mp4|webm|mov|weba|m4a|ogg|enc)$/;
+const EXT_TYPE = { jpg: "image/jpeg", png: "image/png", webp: "image/webp", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", weba: "audio/webm", m4a: "audio/mp4", ogg: "audio/ogg", enc: "application/octet-stream" };
+async function serveMedia(req, res, key) {
+  if (!R2_ON || !MEDIA_KEY_RE.test(key)) return res.json({ error: "not_found" }, 404);
+  if (!limit("med:" + req.ip, 1200, 60000)) return res.json({ error: "rate_limited" }, 429);
+  const ac = new AbortController(); res.on("close", () => ac.abort());
+  try {
+    const h = {}; if (/^bytes=\d*-\d*$/.test(String(req.headers.range || ""))) h.Range = req.headers.range;
+    const r = await fetch(R2.pub + "/" + key, { headers: h, signal: ac.signal });
+    if (r.status !== 200 && r.status !== 206) return res.json({ error: r.status === 416 ? "range" : "not_found" }, r.status === 416 ? 416 : 404);
+    res.statusCode = r.status;
+    // Güvenlik: türü her zaman uzantıdan belirle (kullanıcı yüklediği dosyaya başka tür yazmış olabilir)
+    res.setHeader("Content-Type", EXT_TYPE[key.split(".").pop()]);
+    for (const k of ["content-length", "content-range", "etag", "last-modified"]) { const v = r.headers.get(k); if (v) res.setHeader(k, v); }
+    res.setHeader("Accept-Ranges", "bytes"); res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox"); res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    if (req.method === "HEAD" || !r.body) return res.end();
+    require("stream").Readable.fromWeb(r.body).on("error", () => res.destroy()).pipe(res);
+  } catch (e) { if (!res.headersSent) res.json({ error: "storage_error" }, 502); else res.destroy(); }
+}
+async function mediaUp(req, res, url) {
+  let ok = false; auth(req, res, () => { ok = true; }); if (!ok) return;
+  ok = false; socialMw(req, res, () => { ok = true; }); if (!ok) return;
+  const key = url.searchParams.get("key") || "", is = ISSUED.get(key);
+  if (!R2_ON || !is || is.uid !== req.user.id || is.exp < Date.now() || !MEDIA_KEY_RE.test(key)) return res.json({ error: "bad_media" }, 400);
+  if (!limit("sup2:" + req.user.id, 60, 3600e3)) return res.json({ error: "rate_limited" }, 429);
+  if ((+req.headers["content-length"] || 0) > is.size) return res.json({ error: "too_large" }, 413);
+  ISSUED.delete(key); // tek kullanımlık
+  const ch = []; let n = 0, over = false;
+  try {
+    for await (const c of req) { n += c.length; if (n > is.size) { over = true; break; } ch.push(c); }
+  } catch (e) { return; }
+  if (over || !n) return res.json({ error: over ? "too_large" : "empty" }, over ? 413 : 400);
+  try {
+    const sg = sigV4Presign({ method: "PUT", host: R2.host, pathName: "/" + R2.bucket + "/" + key, keyId: R2.key, secret: R2.sec, region: "auto", service: "s3", date: new Date().toISOString(), expires: 600 });
+    const r = await fetch(R2_BASE + "/" + R2.bucket + "/" + key + "?" + sg.query, { method: "PUT", headers: { "Content-Type": is.type }, body: Buffer.concat(ch), signal: AbortSignal.timeout(120000) });
+    if (!r.ok) return res.json({ error: "storage_error" }, 502);
+    res.json({ ok: true });
+  } catch (e) { res.json({ error: "storage_error" }, 502); }
+}
+// ===== END MEDIA PROXY =====
+
 
 
 // Uygulamanın kendisini de sun (aynı adres, ek ayar gerekmez)
