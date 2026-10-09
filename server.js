@@ -520,9 +520,12 @@ function postRows(rows, me) {
   const cm = Object.fromEntries(db.prepare(`SELECT post_id, COUNT(*) n FROM comments WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids).map(r => [r.post_id, r.n]));
   const mine = new Set(db.prepare(`SELECT post_id FROM likes WHERE user_id=? AND post_id IN (${ph})`).all(me, ...ids).map(r => r.post_id));
   const sv = new Set(db.prepare(`SELECT post_id FROM saves WHERE user_id=? AND post_id IN (${ph})`).all(me, ...ids).map(r => r.post_id));
-  return rows.map(r => ({ saved: sv.has(r.id), id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), likes: lk[r.id] || 0, comments: cm[r.id] || 0, liked: mine.has(r.id), own: r.user_id === me }));
+  const vw = Object.fromEntries(db.prepare(`SELECT post_id, COUNT(*) n FROM reel_views WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids).map(r => [r.post_id, r.n]));
+  const cids = [...new Set(rows.map(r => r.community).filter(Boolean))], cmap = {};
+  if (cids.length) for (const c of db.prepare(`SELECT id, handle, name FROM communities WHERE id IN (${cids.map(() => "?").join(",")})`).all(...cids)) cmap[c.id] = { handle: c.handle, name: c.name };
+  return rows.map(r => ({ community: r.community && cmap[r.community] ? cmap[r.community] : null, views: vw[r.id] || 0, poster: r.poster ? mediaUrl(r.poster) : "", saved: sv.has(r.id), id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), likes: lk[r.id] || 0, comments: cm[r.id] || 0, liked: mine.has(r.id), own: r.user_id === me }));
 }
-const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.created, f.handle, f.avatar FROM posts p JOIN profiles f ON f.user_id=p.user_id";
+const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.community, p.created, f.handle, f.avatar FROM posts p JOIN profiles f ON f.user_id=p.user_id";
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id)";
 
@@ -566,25 +569,48 @@ S("post", needProf, (req, res) => {
     const okExt = kind === "photo" ? /\.(jpg|png|webp)$/ : /\.(mp4|webm|mov)$/;
     if (!media.startsWith("m/" + req.user.id + "/") || !okExt.test(media) || media.length > 120) return res.status(400).json({ error: "bad_media" });
   }
+  let cid = "";
+  if (b.community) {
+    const c = db.prepare("SELECT id, posting FROM communities WHERE handle=?").get(String(b.community).toLowerCase());
+    if (!c) return res.status(404).json({ error: "no_community" });
+    const m = db.prepare("SELECT role FROM community_members WHERE cid=? AND user_id=?").get(c.id, req.user.id);
+    if (!m || db.prepare("SELECT 1 FROM community_bans WHERE cid=? AND user_id=?").get(c.id, req.user.id)) return res.status(403).json({ error: "not_member" });
+    if (c.posting === "mods" && m.role === "member") return res.status(403).json({ error: "mods_only" });
+    cid = c.id;
+  }
+  let poster = String(b.poster || "");
+  if (poster && (kind !== "reel" || !poster.startsWith("m/" + req.user.id + "/") || !/\.(jpg|png|webp)$/.test(poster) || poster.length > 120)) poster = "";
   const id = "p" + rnd(8);
-  db.prepare("INSERT INTO posts(id,user_id,kind,text,media,created) VALUES(?,?,?,?,?,?)").run(id, req.user.id, kind, text, kind === "text" ? "" : media, now());
+  db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,community,created) VALUES(?,?,?,?,?,?,?,?)").run(id, req.user.id, kind, text, kind === "text" ? "" : media, kind === "reel" ? poster : "", cid, now());
   afterPost(id, req.user.id, text);
   res.json({ ok: true, id });
 });
 
 S("feed", needProf, (req, res) => {
-  const b = req.body || {}, me = req.user.id, before = +b.before || now() + 1, mode = ["following", "all", "reels", "user"][["following", "all", "reels", "user"].indexOf(b.mode)] || "all";
+  const b = req.body || {}, me = req.user.id, before = +b.before || now() + 1, mode = ["following", "all", "reels", "user", "foryou", "freels"][["following", "all", "reels", "user", "foryou", "freels"].indexOf(b.mode)] || "all";
   let rows;
   if (mode === "user") {
     const p = profByHandle(b.handle); if (!p) return res.status(404).json({ error: "no_user" });
     if (blockedEither(me, p.user_id)) return res.json({ posts: [] });
-    rows = db.prepare(`${POST_SEL} WHERE p.user_id=? AND p.created<? ORDER BY p.created DESC LIMIT 20`).all(p.user_id, before);
+    rows = db.prepare(`${POST_SEL} WHERE p.user_id=? AND p.community='' AND p.created<? ORDER BY p.created DESC LIMIT 20`).all(p.user_id, before);
   } else if (mode === "following") {
-    rows = db.prepare(`${POST_SEL} WHERE (p.user_id=? OR p.user_id IN (SELECT followee FROM follows WHERE follower=?)) AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(me, me, before, me, me);
+    rows = db.prepare(`${POST_SEL} WHERE (p.user_id=? OR p.user_id IN (SELECT followee FROM follows WHERE follower=?)) AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(me, me, before, me, me);
+  } else if (mode === "foryou") {
+    const seen = new Set((Array.isArray(b.seen) ? b.seen : []).slice(0, 300).map(String));
+    const cand = db.prepare(`${POST_SEL} WHERE p.kind='reel' AND p.community='' AND p.created>? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 300`).all(now() - 45 * 864e5, me, me).filter(r => !seen.has(r.id));
+    if (!cand.length) return res.json({ posts: [] });
+    const ids = cand.map(r => r.id), ph = ids.map(() => "?").join(",");
+    const cnt = (sql) => Object.fromEntries(db.prepare(sql.replace("##", ph)).all(...ids).map(r => [r.post_id, r.n]));
+    const lk = cnt("SELECT post_id, COUNT(*) n FROM likes WHERE post_id IN (##) GROUP BY post_id"), cm = cnt("SELECT post_id, COUNT(*) n FROM comments WHERE post_id IN (##) GROUP BY post_id"), vw = cnt("SELECT post_id, COUNT(*) n FROM reel_views WHERE post_id IN (##) GROUP BY post_id");
+    const fol = new Set(db.prepare("SELECT followee FROM follows WHERE follower=?").all(me).map(r => r.followee)), t0 = now();
+    const sc = r => { const age = (t0 - r.created) / 36e5, eng = 2 * (lk[r.id] || 0) + 3 * (cm[r.id] || 0) + 0.3 * (vw[r.id] || 0) + 1; return eng / Math.pow(age + 2, 0.7) * (fol.has(r.user_id) ? 2 : 1) * (r.user_id === me ? 0.3 : 1) * (0.8 + Math.random() * 0.4); };
+    rows = cand.map(r => [sc(r), r]).sort((x, y) => y[0] - x[0]).slice(0, 10).map(x => x[1]);
+  } else if (mode === "freels") {
+    rows = db.prepare(`${POST_SEL} WHERE p.kind='reel' AND p.community='' AND (p.user_id=? OR p.user_id IN (SELECT followee FROM follows WHERE follower=?)) AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 12`).all(me, me, before, me, me);
   } else if (mode === "reels") {
-    rows = db.prepare(`${POST_SEL} WHERE p.kind='reel' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 12`).all(before, me, me);
+    rows = db.prepare(`${POST_SEL} WHERE p.kind='reel' AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 12`).all(before, me, me);
   } else {
-    rows = db.prepare(`${POST_SEL} WHERE p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(before, me, me);
+    rows = db.prepare(`${POST_SEL} WHERE p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(before, me, me);
   }
   res.json({ posts: postRows(rows, me) });
 });
@@ -621,8 +647,8 @@ S("delcomment", needProf, (req, res) => {
 S("delete", needProf, (req, res) => {
   const id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id);
   if (!p || p.user_id !== req.user.id) return res.status(404).json({ error: "not_found" });
-  const pm = db.prepare("SELECT media FROM posts WHERE id=?").get(id);
-  db.prepare("DELETE FROM posts WHERE id=?").run(id); if (pm && pm.media) r2Del(pm.media); res.json({ ok: true });
+  const pm = db.prepare("SELECT media, poster FROM posts WHERE id=?").get(id);
+  db.prepare("DELETE FROM posts WHERE id=?").run(id); if (pm && pm.media) r2Del(pm.media); if (pm && pm.poster) r2Del(pm.poster); res.json({ ok: true });
 });
 
 S("user", needProf, (req, res) => {
@@ -655,7 +681,7 @@ S("block", needProf, (req, res) => {
 });
 S("report", needProf, (req, res) => {
   if (!limit("srep:" + req.user.id, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
-  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group"].includes(b.kind) ? b.kind : "";
+  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community"].includes(b.kind) ? b.kind : "";
   if (!kind) return res.status(400).json({ error: "bad_kind" });
   db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created,evidence) VALUES(?,?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now(), kind === "msg" ? cleanText(b.evidence, 2000) : "");
   res.json({ ok: true });
@@ -713,6 +739,7 @@ app.post("/api/admin/reports", (req, res) => {
       else if (r.kind === "story") { const p = db.prepare("SELECT user_id, text, media FROM stories WHERE id=?").get(r.target); if (p) { o.preview = p.text; o.target_handle = hOf(p.user_id); o.media = mediaUrl(p.media); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "comment") { const p = db.prepare("SELECT user_id, text FROM comments WHERE id=?").get(r.target); if (p) { o.preview = p.text; o.target_handle = hOf(p.user_id); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "user") { o.target_handle = r.target; }
+      else if (r.kind === "community") { const c = db.prepare("SELECT name, about, rules, owner FROM communities WHERE handle=?").get(r.target); if (c) { o.preview = c.name + " — " + c.about + (c.rules ? "\nKurallar: " + c.rules : ""); o.target_handle = hOf(c.owner); } else o.preview = "(silinmiş)"; }
     } catch (e) { /* önizleme isteğe bağlı */ }
     return o;
   });
@@ -723,7 +750,7 @@ app.post("/api/admin/stats", (req, res) => {
   res.json({ users: db.prepare("SELECT COUNT(*) n FROM users").get().n, users7: c("SELECT COUNT(*) n FROM users WHERE created>?"), profiles: db.prepare("SELECT COUNT(*) n FROM profiles").get().n,
     posts: db.prepare("SELECT COUNT(*) n FROM posts").get().n, posts7: c("SELECT COUNT(*) n FROM posts WHERE created>?"), stories: db.prepare("SELECT COUNT(*) n FROM stories WHERE expires>?").get(now()).n,
     msgs: db.prepare("SELECT COUNT(*) n FROM msgs").get().n + db.prepare("SELECT COUNT(*) n FROM gmsgs").get().n, groups: db.prepare("SELECT COUNT(*) n FROM chat_groups").get().n,
-    reports: db.prepare("SELECT COUNT(*) n FROM reports").get().n, bans: db.prepare("SELECT COUNT(*) n FROM bans").get().n, e2e_keys: db.prepare("SELECT COUNT(*) n FROM e2e_keys WHERE active=1").get().n });
+    communities: db.prepare("SELECT COUNT(*) n FROM communities").get().n, reports: db.prepare("SELECT COUNT(*) n FROM reports").get().n, bans: db.prepare("SELECT COUNT(*) n FROM bans").get().n, e2e_keys: db.prepare("SELECT COUNT(*) n FROM e2e_keys WHERE active=1").get().n });
 });
 app.post("/api/admin/users", (req, res) => {
   if (!admOk(req, res)) return; const q = "%" + String((req.body || {}).q || "").replace(/[%_\\]/g, "").slice(0, 40) + "%";
@@ -738,8 +765,9 @@ app.post("/api/admin/posts", (req, res) => {
 app.post("/api/admin/remove", (req, res) => {
   if (!admOk(req, res)) return;
   const b = req.body || {};
-  if (b.post) { const pm = db.prepare("SELECT media FROM posts WHERE id=?").get(String(b.post)); db.prepare("DELETE FROM posts WHERE id=?").run(String(b.post)); if (pm && pm.media) r2Del(pm.media); }
+  if (b.post) { const pm = db.prepare("SELECT media, poster FROM posts WHERE id=?").get(String(b.post)); db.prepare("DELETE FROM posts WHERE id=?").run(String(b.post)); if (pm && pm.media) r2Del(pm.media); if (pm && pm.poster) r2Del(pm.poster); }
   if (b.story) { const sm = db.prepare("SELECT media FROM stories WHERE id=?").get(String(b.story)); db.prepare("DELETE FROM stories WHERE id=?").run(String(b.story)); if (sm && sm.media) r2Del(sm.media); }
+  if (b.community) deleteCommunity(String(b.community).toLowerCase());
   if (b.comment) db.prepare("DELETE FROM comments WHERE id=?").run(String(b.comment));
   if (b.msg) { const m = /^d:(\d{1,12})$/.exec(String(b.msg)), g = /^g:([A-Za-z0-9]{1,20}):(\d{1,12})$/.exec(String(b.msg)); let mm = null;
     if (m) { mm = db.prepare("SELECT media FROM msgs WHERE id=?").get(+m[1]); db.prepare("DELETE FROM msgs WHERE id=?").run(+m[1]); }
@@ -876,7 +904,7 @@ S("notifs_read", needProf, (req, res) => { db.prepare("UPDATE notifs SET read=1 
 S("tag", needProf, (req, res) => {
   const me = req.user.id, tag = String((req.body || {}).tag || "").replace(/^#/, "").toLocaleLowerCase("tr"), before = +(req.body || {}).before || now() + 1;
   if (!/^[\p{L}\p{N}_]{2,30}$/u.test(tag)) return res.status(400).json({ error: "bad_tag" });
-  const rows = db.prepare(`${POST_SEL} JOIN tags t ON t.post_id=p.id WHERE t.tag=? AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(tag, before, me, me);
+  const rows = db.prepare(`${POST_SEL} JOIN tags t ON t.post_id=p.id WHERE t.tag=? AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(tag, before, me, me);
   res.json({ tag, posts: postRows(rows, me) });
 });
 S("getpost", needProf, (req, res) => {
@@ -887,7 +915,7 @@ S("getpost", needProf, (req, res) => {
 S("explore", needProf, (req, res) => {
   const me = req.user.id, t = now();
   const tags = db.prepare("SELECT t.tag, COUNT(*) n FROM tags t JOIN posts p ON p.id=t.post_id WHERE t.created>? AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) GROUP BY t.tag ORDER BY n DESC, MAX(t.created) DESC LIMIT 10").all(t - 7 * 864e5);
-  const rows = db.prepare(`${POST_SEL} WHERE p.created>? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY ((SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id)*2 + (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id)) DESC, p.created DESC LIMIT 18`).all(t - 30 * 864e5, me, me);
+  const rows = db.prepare(`${POST_SEL} WHERE p.community='' AND p.created>? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY ((SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id)*2 + (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id)) DESC, p.created DESC LIMIT 18`).all(t - 30 * 864e5, me, me);
   const ppl = db.prepare("SELECT f.user_id, f.handle, f.bio, f.avatar, (SELECT COUNT(*) FROM follows WHERE followee=f.user_id) n FROM profiles f WHERE f.user_id<>? AND f.user_id NOT IN (SELECT followee FROM follows WHERE follower=?) AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=f.user_id) ORDER BY n DESC, f.created DESC LIMIT 12").all(me, me);
   res.json({ tags: tags.map(r => ({ tag: r.tag, n: r.n })), posts: postRows(rows, me), people: ppl.filter(r => !blockedEither(me, r.user_id)).slice(0, 8).map(r => ({ handle: r.handle, bio: r.bio, avatar: mediaUrl(r.avatar), followers: r.n })) });
 });
@@ -1131,12 +1159,140 @@ S("msg_delete", needProf, (req, res) => {
 });
 function purgeUserMedia(uid) {
   const keys = new Set();
-  for (const q of ["SELECT media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
+  for (const c of db.prepare("SELECT handle FROM communities WHERE owner=?").all(uid)) deleteCommunity(c.handle);
+  for (const q of ["SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
     for (const r of db.prepare(q).all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT media FROM msgs WHERE from_id=? OR to_id=?").all(uid, uid)) if (r.media) keys.add(r.media);
   for (const k of keys) r2Del(k);
 }
 // ===== END SOCIAL3 =====
+
+// ===== BEGIN REELS =====
+// Kısa video: kapak görseli, benzersiz izlenme sayısı, "Sana özel" sıralaması (feed mode=foryou)
+try { db.exec("ALTER TABLE posts ADD COLUMN poster TEXT NOT NULL DEFAULT ''"); } catch (e) { /* sütun zaten var */ }
+db.exec(`CREATE TABLE IF NOT EXISTS reel_views(post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL, PRIMARY KEY(post_id, user_id));`);
+S("reel_view", needProf, (req, res) => {
+  if (!limit("rview:" + req.user.id, 400, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id, kind FROM posts WHERE id=?").get(id);
+  if (!p || p.kind !== "reel" || blockedEither(req.user.id, p.user_id)) return res.status(404).json({ error: "not_found" });
+  if (p.user_id !== req.user.id) db.prepare("INSERT OR IGNORE INTO reel_views(post_id,user_id,created) VALUES(?,?,?)").run(id, req.user.id, now());
+  res.json({ views: db.prepare("SELECT COUNT(*) n FROM reel_views WHERE post_id=?").get(id).n });
+});
+// ===== END REELS =====
+
+// ===== BEGIN COMMUNITIES =====
+// Topluluklar: herkese açık, kurallı, yöneticili odalar. Gönderiler posts tablosunda (community sütunu) tutulur; genel akışlarda görünmez.
+try { db.exec("ALTER TABLE posts ADD COLUMN community TEXT NOT NULL DEFAULT ''"); } catch (e) { /* sütun zaten var */ }
+db.exec(`
+CREATE TABLE IF NOT EXISTS communities(id TEXT PRIMARY KEY, handle TEXT NOT NULL UNIQUE, name TEXT NOT NULL, about TEXT NOT NULL DEFAULT '', rules TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT '👥', posting TEXT NOT NULL DEFAULT 'all', owner TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS community_members(cid TEXT NOT NULL REFERENCES communities(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL DEFAULT 'member', created INTEGER NOT NULL, PRIMARY KEY(cid, user_id));
+CREATE INDEX IF NOT EXISTS cm_u ON community_members(user_id);
+CREATE TABLE IF NOT EXISTS community_bans(cid TEXT NOT NULL REFERENCES communities(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY(cid, user_id));
+CREATE INDEX IF NOT EXISTS posts_c ON posts(community, created DESC);
+`);
+const C_HANDLE = /^[a-z0-9_]{3,24}$/, C_MAX_MEMBERS = 5000;
+function deleteCommunity(handle) {
+  const c = db.prepare("SELECT id FROM communities WHERE handle=?").get(handle); if (!c) return false;
+  for (const p of db.prepare("SELECT media, poster FROM posts WHERE community=?").all(c.id)) { if (p.media) r2Del(p.media); if (p.poster) r2Del(p.poster); }
+  db.prepare("DELETE FROM posts WHERE community=?").run(c.id); db.prepare("DELETE FROM communities WHERE id=?").run(c.id); return true;
+}
+const cInfo = (c, me) => {
+  const m = db.prepare("SELECT role FROM community_members WHERE cid=? AND user_id=?").get(c.id, me);
+  return { handle: c.handle, name: c.name, about: c.about, rules: c.rules, icon: c.icon, posting: c.posting, created: c.created, members: db.prepare("SELECT COUNT(*) n FROM community_members WHERE cid=?").get(c.id).n, role: m ? m.role : "", banned: !!db.prepare("SELECT 1 FROM community_bans WHERE cid=? AND user_id=?").get(c.id, me) };
+};
+const cByHandle = h => C_HANDLE.test(String(h || "").toLowerCase()) ? db.prepare("SELECT * FROM communities WHERE handle=?").get(String(h).toLowerCase()) : null;
+const cRole = (c, uid) => { const m = db.prepare("SELECT role FROM community_members WHERE cid=? AND user_id=?").get(c.id, uid); return m ? m.role : ""; };
+const cModOk = (c, uid) => ["owner", "mod"].includes(cRole(c, uid));
+const cIcon = v => { const t = Array.from(String(v || "").trim()).slice(0, 2).join(""); return t && !/[<>&"'`]/.test(t) && t.length <= 8 ? t : "👥"; };
+S("c_create", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, handle = String(b.handle || "").toLowerCase().replace(/^@/, ""), name = cleanText(b.name, 40).replace(/\n/g, " ");
+  if (!C_HANDLE.test(handle)) return res.status(400).json({ error: "bad_handle" });
+  if (!name) return res.status(400).json({ error: "bad_name" });
+  if (!limit("ccreate:" + me, 5, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (db.prepare("SELECT COUNT(*) n FROM communities WHERE owner=?").get(me).n >= 3) return res.status(400).json({ error: "too_many_owned" });
+  if (db.prepare("SELECT 1 FROM communities WHERE handle=?").get(handle)) return res.status(409).json({ error: "handle_taken" });
+  const id = "c" + rnd(8), posting = b.posting === "mods" ? "mods" : "all";
+  db.prepare("INSERT INTO communities(id,handle,name,about,rules,icon,posting,owner,created) VALUES(?,?,?,?,?,?,?,?,?)").run(id, handle, name, cleanText(b.about, 300), cleanText(b.rules, 600), cIcon(b.icon), posting, me, now());
+  db.prepare("INSERT INTO community_members(cid,user_id,role,created) VALUES(?,?,'owner',?)").run(id, me, now());
+  res.json({ ok: true, handle });
+});
+S("c_get", needProf, (req, res) => {
+  const c = cByHandle((req.body || {}).handle); if (!c || db.prepare("SELECT 1 FROM bans WHERE user_id=?").get(c.owner)) return res.status(404).json({ error: "not_found" });
+  res.json({ community: cInfo(c, req.user.id) });
+});
+S("c_list", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, mode = ["mine", "popular", "new"].includes(b.mode) ? b.mode : "popular", q = String(b.q || "").replace(/[%_\\]/g, "").trim().slice(0, 30).toLowerCase();
+  const base = "SELECT c.*, (SELECT COUNT(*) FROM community_members m WHERE m.cid=c.id) n FROM communities c WHERE NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=c.owner)";
+  let rows;
+  if (q) rows = db.prepare(`${base} AND (c.handle LIKE ? OR lower(c.name) LIKE ?) ORDER BY n DESC LIMIT 30`).all("%" + q + "%", "%" + q + "%");
+  else if (mode === "mine") rows = db.prepare(`${base} AND c.id IN (SELECT cid FROM community_members WHERE user_id=?) ORDER BY c.name LIMIT 60`).all(me);
+  else if (mode === "new") rows = db.prepare(`${base} ORDER BY c.created DESC LIMIT 30`).all();
+  else rows = db.prepare(`${base} ORDER BY n DESC, c.created DESC LIMIT 30`).all();
+  const mine = new Map(db.prepare("SELECT cid, role FROM community_members WHERE user_id=?").all(me).map(r => [r.cid, r.role]));
+  res.json({ communities: rows.map(c => ({ handle: c.handle, name: c.name, about: c.about, icon: c.icon, members: c.n, role: mine.get(c.id) || "" })) });
+});
+S("c_join", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (!limit("cjoin:" + me, 40, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (b.on) {
+    if (db.prepare("SELECT 1 FROM community_bans WHERE cid=? AND user_id=?").get(c.id, me)) return res.status(403).json({ error: "banned_here" });
+    if (db.prepare("SELECT COUNT(*) n FROM community_members WHERE cid=?").get(c.id).n >= C_MAX_MEMBERS) return res.status(409).json({ error: "full" });
+    db.prepare("INSERT OR IGNORE INTO community_members(cid,user_id,role,created) VALUES(?,?,'member',?)").run(c.id, me, now());
+  } else {
+    if (c.owner === me) return res.status(409).json({ error: "owner_cannot_leave" });
+    db.prepare("DELETE FROM community_members WHERE cid=? AND user_id=?").run(c.id, me);
+  }
+  res.json({ community: cInfo(c, me) });
+});
+S("c_feed", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c || db.prepare("SELECT 1 FROM bans WHERE user_id=?").get(c.owner)) return res.status(404).json({ error: "not_found" });
+  const before = +b.before || now() + 1;
+  const rows = db.prepare(`${POST_SEL} WHERE p.community=? AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(c.id, before, me, me);
+  res.json({ posts: postRows(rows, me), role: cRole(c, me) });
+});
+S("c_members", needProf, (req, res) => {
+  const me = req.user.id, c = cByHandle((req.body || {}).handle); if (!c) return res.status(404).json({ error: "not_found" });
+  const rows = db.prepare("SELECT m.user_id, m.role, f.handle, f.avatar FROM community_members m JOIN profiles f ON f.user_id=m.user_id WHERE m.cid=? ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'mod' THEN 1 ELSE 2 END, m.created DESC LIMIT 100").all(c.id);
+  res.json({ members: rows.filter(r => !blockedEither(me, r.user_id)).map(r => ({ handle: r.handle, role: r.role, avatar: mediaUrl(r.avatar) })), my: cRole(c, me) });
+});
+S("c_role", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (c.owner !== me) return res.status(403).json({ error: "forbidden" });
+  const t = profByHandle(b.user); if (!t || t.user_id === me || !cRole(c, t.user_id)) return res.status(404).json({ error: "no_member" });
+  db.prepare("UPDATE community_members SET role=? WHERE cid=? AND user_id=?").run(b.role === "mod" ? "mod" : "member", c.id, t.user_id);
+  res.json({ ok: true });
+});
+S("c_kick", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (!cModOk(c, me)) return res.status(403).json({ error: "forbidden" });
+  const t = profByHandle(b.user); if (!t || t.user_id === c.owner || t.user_id === me) return res.status(400).json({ error: "bad_target" });
+  const tr = cRole(c, t.user_id); if (tr === "mod" && c.owner !== me) return res.status(403).json({ error: "forbidden" });
+  db.prepare("DELETE FROM community_members WHERE cid=? AND user_id=?").run(c.id, t.user_id);
+  if (b.ban) db.prepare("INSERT OR IGNORE INTO community_bans(cid,user_id) VALUES(?,?)").run(c.id, t.user_id);
+  if (b.purge) { for (const p of db.prepare("SELECT media, poster FROM posts WHERE community=? AND user_id=?").all(c.id, t.user_id)) { if (p.media) r2Del(p.media); if (p.poster) r2Del(p.poster); } db.prepare("DELETE FROM posts WHERE community=? AND user_id=?").run(c.id, t.user_id); }
+  res.json({ ok: true });
+});
+S("c_remove_post", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (!cModOk(c, me)) return res.status(403).json({ error: "forbidden" });
+  const pm = db.prepare("SELECT media, poster FROM posts WHERE id=? AND community=?").get(String(b.id || ""), c.id); if (!pm) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM posts WHERE id=?").run(String(b.id)); if (pm.media) r2Del(pm.media); if (pm.poster) r2Del(pm.poster);
+  res.json({ ok: true });
+});
+S("c_update", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (c.owner !== me) return res.status(403).json({ error: "forbidden" });
+  const name = cleanText(b.name, 40).replace(/\n/g, " "); if (!name) return res.status(400).json({ error: "bad_name" });
+  db.prepare("UPDATE communities SET name=?, about=?, rules=?, icon=?, posting=? WHERE id=?").run(name, cleanText(b.about, 300), cleanText(b.rules, 600), cIcon(b.icon), b.posting === "mods" ? "mods" : "all", c.id);
+  res.json({ community: cInfo(cByHandle(c.handle), me) });
+});
+S("c_delete", needProf, (req, res) => {
+  const c = cByHandle((req.body || {}).handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (c.owner !== req.user.id) return res.status(403).json({ error: "forbidden" });
+  deleteCommunity(c.handle); res.json({ ok: true });
+});
+// ===== END COMMUNITIES =====
+
 
 
 // ===== BEGIN MEDIA PROXY =====
