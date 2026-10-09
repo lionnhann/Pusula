@@ -176,6 +176,8 @@ const server = http.createServer(async (req, res) => {
   try {
     if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/media/")) return serveMedia(req, res, pathname.slice(7));
     if (req.method === "PUT" && pathname === "/media-up") return mediaUp(req, res, url);
+    if (req.method === "PUT" && pathname === "/live-up") return liveUp(req, res, url);
+    if (req.method === "GET" && pathname === "/live-seg") return liveSeg(req, res, url);
     if (pathname.startsWith("/api/")) {
       if (!limit("ip:" + req.ip, 240, 60000)) return res.json({ error: "rate_limited" }, 429);
       const r = routes.find(x => x.method === req.method && x.p === pathname);
@@ -710,7 +712,7 @@ S("block", needProf, (req, res) => {
 });
 S("report", needProf, (req, res) => {
   if (!limit("srep:" + req.user.id, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
-  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community", "listing", "sound"].includes(b.kind) ? b.kind : "";
+  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group", "community", "listing", "sound", "live"].includes(b.kind) ? b.kind : "";
   if (!kind) return res.status(400).json({ error: "bad_kind" });
   db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created,evidence) VALUES(?,?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now(), kind === "msg" ? cleanText(b.evidence, 2000) : "");
   res.json({ ok: true });
@@ -770,6 +772,7 @@ app.post("/api/admin/reports", (req, res) => {
       else if (r.kind === "user") { o.target_handle = r.target; }
       else if (r.kind === "listing") { const l = db.prepare("SELECT title, about, price, currency, user_id, image FROM listings WHERE id=?").get(r.target); if (l) { o.preview = l.title + " — " + (l.price >= 0 ? l.price + " " + l.currency : "fiyat sorulur") + "\n" + l.about; o.target_handle = hOf(l.user_id); o.media = mediaUrl(l.image); } else o.preview = "(silinmiş)"; }
       else if (r.kind === "sound") { const x = db.prepare("SELECT title, user_id FROM sounds WHERE id=?").get(r.target); if (x) { o.preview = "🎵 " + x.title; o.target_handle = hOf(x.user_id); } else o.preview = "(silinmiş)"; }
+      else if (r.kind === "live") { const l = LIVE.get(r.target); if (l) { o.preview = "🔴 " + l.title; o.target_handle = l.handle; } else o.preview = "(bitmiş)"; }
       else if (r.kind === "community") { const c = db.prepare("SELECT name, about, rules, owner FROM communities WHERE handle=?").get(r.target); if (c) { o.preview = c.name + " — " + c.about + (c.rules ? "\nKurallar: " + c.rules : ""); o.target_handle = hOf(c.owner); } else o.preview = "(silinmiş)"; }
     } catch (e) { /* önizleme isteğe bağlı */ }
     return o;
@@ -800,6 +803,7 @@ app.post("/api/admin/remove", (req, res) => {
   if (b.story) { const sm = db.prepare("SELECT media FROM stories WHERE id=?").get(String(b.story)); db.prepare("DELETE FROM stories WHERE id=?").run(String(b.story)); if (sm && sm.media) r2Free(sm.media); }
   if (b.community) deleteCommunity(String(b.community).toLowerCase());
   if (b.sound) soundRemove(String(b.sound));
+  if (b.live) { const l = LIVE.get(String(b.live)); if (l) liveEnd(l); }
   if (b.listing) { const lm = db.prepare("SELECT image FROM listings WHERE id=?").get(String(b.listing)); db.prepare("DELETE FROM listings WHERE id=?").run(String(b.listing)); if (lm && lm.image) r2Del(lm.image); }
   if (b.comment) db.prepare("DELETE FROM comments WHERE id=?").run(String(b.comment));
   if (b.msg) { const m = /^d:(\d{1,12})$/.exec(String(b.msg)), g = /^g:([A-Za-z0-9]{1,20}):(\d{1,12})$/.exec(String(b.msg)); let mm = null;
@@ -1709,7 +1713,8 @@ const soundOk = id => { id = String(id || ""); if (!id) return ""; if (SYN[id]) 
 const soundUse = id => { if (!SYN[id]) db.prepare("UPDATE sounds SET uses=uses+1 WHERE id=?").run(id); };
 function soundInfo(id) {
   if (SYN[id]) return { id, title: SYN[id], syn: true };
-  const x = db.prepare("SELECT s.id, s.title, s.media, s.dur, f.handle FROM sounds s JOIN profiles f ON f.user_id=s.user_id WHERE s.id=?").get(id);
+  const x = db.prepare("SELECT s.id, s.title, s.media, s.dur, s.ext, s.url, s.artist, s.link, f.handle FROM sounds s JOIN profiles f ON f.user_id=s.user_id WHERE s.id=?").get(id);
+  if (x && x.ext) return { id: x.id, title: x.title, url: x.url, dur: x.dur, by: x.artist, ext: true, src: x.ext.startsWith("au:") ? "Audius" : "Jamendo", link: x.link };
   return x ? { id: x.id, title: x.title, url: mediaUrl(x.media), dur: x.dur, by: x.handle } : null;
 }
 S("sound_new", needProf, (req, res) => {
@@ -1735,6 +1740,137 @@ S("sound_del", needProf, (req, res) => {
   soundRemove(id); res.json({ ok: true });
 });
 // ===== END MUSIC =====
+
+// ===== BEGIN CATALOG =====
+// Dünya müzik kataloğu: Audius (anahtarsız, sanatçıların kendi yüklediği müzik) ve Jamendo (JAMENDO_CLIENT_ID varsa, Creative Commons).
+for (const c of ["ext", "url", "artist", "link"]) try { db.exec("ALTER TABLE sounds ADD COLUMN " + c + " TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+const CAT = { on: process.env.CATALOG !== "0", au: String(process.env.CATALOG_AUDIUS_HOST || "https://api.audius.co").replace(/\/+$/, ""), auApp: process.env.AUDIUS_APP_NAME || "Pusula", auKey: process.env.AUDIUS_API_KEY || "", jm: String(process.env.CATALOG_JAMENDO_HOST || "https://api.jamendo.com").replace(/\/+$/, ""), jmId: process.env.JAMENDO_CLIENT_ID || "" };
+const CATC = new Map(), CATT = new Map();
+const catSources = () => CAT.on ? ["au", ...(CAT.jmId ? ["jm"] : [])] : [];
+const auQ = () => "app_name=" + encodeURIComponent(CAT.auApp) + (CAT.auKey ? "&api_key=" + encodeURIComponent(CAT.auKey) : "");
+const httpsOnly = u => /^https:\/\/[^\s]+$/.test(String(u || "")) || (process.env.CATALOG_ALLOW_HTTP === "1" && /^http:\/\/127\.0\.0\.1[:/]/.test(String(u || "")));
+async function catFetch(url) { const r = await fetch(url, { signal: AbortSignal.timeout(8000), headers: { accept: "application/json", "user-agent": "Pusula/1.0" } }); if (!r.ok) throw new Error("http " + r.status); return r.json(); }
+async function catQuery(src, q) {
+  const key = src + ":" + q, hit = CATC.get(key); if (hit && hit.t > Date.now()) return hit.v;
+  let out = [];
+  if (src === "au") {
+    const j = await catFetch(CAT.au + "/v1/tracks/" + (q ? "search?query=" + encodeURIComponent(q) + "&" : "trending?") + auQ() + "&limit=25");
+    out = (Array.isArray(j.data) ? j.data : []).filter(t => t && t.id && t.is_streamable !== false && +t.duration > 0 && +t.duration <= 900).map(t => ({
+      ext: "au:" + String(t.id).replace(/[^A-Za-z0-9]/g, ""), src: "Audius", title: cleanText(t.title, 80).replace(/\n/g, " "), by: cleanText((t.user || {}).name, 60), dur: Math.round(+t.duration), art: t.artwork && (t.artwork["150x150"] || t.artwork["480x480"]) || "",
+      url: CAT.au + "/v1/tracks/" + encodeURIComponent(String(t.id)) + "/stream?" + auQ(), link: t.permalink ? "https://audius.co" + String(t.permalink) : "" }));
+  } else if (src === "jm" && CAT.jmId) {
+    const j = await catFetch(CAT.jm + "/v3.0/tracks/?client_id=" + encodeURIComponent(CAT.jmId) + "&format=json&limit=25&audioformat=mp32&" + (q ? "search=" + encodeURIComponent(q) : "order=popularity_week"));
+    out = (Array.isArray(j.results) ? j.results : []).filter(t => t && t.id && t.audio && +t.duration > 0).map(t => ({
+      ext: "jm:" + String(t.id).replace(/[^A-Za-z0-9]/g, ""), src: "Jamendo", title: cleanText(t.name, 80).replace(/\n/g, " "), by: cleanText(t.artist_name, 60), dur: Math.round(+t.duration), art: t.image || "", url: t.audio, link: t.shareurl || "" }));
+  }
+  out = out.filter(t => t.title && httpsOnly(t.url)).map(t => Object.assign(t, { art: httpsOnly(t.art) ? t.art : "", link: httpsOnly(t.link) ? t.link : "" })).slice(0, 25);
+  if (CATC.size > 300) CATC.clear(); CATC.set(key, { t: Date.now() + 300e3, v: out });
+  for (const t of out) { if (CATT.size > 3000) CATT.delete(CATT.keys().next().value); CATT.set(t.ext, { t, exp: Date.now() + 1800e3 }); }
+  return out;
+}
+S("cat_search", needProf, async (req, res) => {
+  const me = req.user.id, b = req.body || {}, src = b.src === "jm" ? "jm" : "au", q = cleanText(b.q, 60).replace(/\n/g, " ");
+  if (!CAT.on) return res.status(501).json({ error: "catalog_off" });
+  if (src === "jm" && !CAT.jmId) return res.status(501).json({ error: "catalog_off" });
+  if (!limit("scat:" + me, 40, 60e3)) return res.status(429).json({ error: "rate_limited" });
+  try { res.json({ sources: catSources(), tracks: await catQuery(src, q) }); } catch (e) { res.status(502).json({ error: "catalog_unreachable" }); }
+});
+S("cat_pick", needProf, (req, res) => {
+  const me = req.user.id, ext = String((req.body || {}).ext || "");
+  if (!CAT.on) return res.status(501).json({ error: "catalog_off" });
+  const old = db.prepare("SELECT id FROM sounds WHERE ext=?").get(ext); if (old) return res.json({ ok: true, sound: soundInfo(old.id) });
+  const h = CATT.get(ext); if (!h || h.exp < Date.now()) return res.status(404).json({ error: "expired" });
+  if (!limit("scp:" + me, 40, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const t = h.t, id = "n" + rnd(10);
+  db.prepare("INSERT INTO sounds(id,user_id,title,tkey,media,dur,created,ext,url,artist,link) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id, me, t.title, nrm(t.title + " " + t.by), "", t.dur, now(), ext, t.url, t.by, t.link);
+  res.json({ ok: true, sound: soundInfo(id) });
+});
+// ===== END CATALOG =====
+
+// ===== BEGIN LIVE =====
+// Canlı yayın: yayıncı tarayıcı 2 sn'lik bağımsız WebM parçaları gönderir, izleyiciler parçaları sırayla çekip MediaSource ile oynatır.
+// Parçalar yalnızca bellekte tutulur (son birkaçı); kayıt/tekrar izleme yoktur.
+const LIVE = new Map();
+const LIVE_MAX_VIEWERS = +process.env.LIVE_MAX_VIEWERS || 40, LIVE_MAX_MS = 2 * 3600e3, LIVE_KEEP = 8, LIVE_SEG_MAX = 1.5 * 1024 * 1024;
+function liveEnd(l) { if (l.ended) return; l.ended = true; l.endAt = Date.now(); for (const w of l.waiters.splice(0)) w(); }
+setInterval(() => { const t = Date.now(); for (const [id, l] of LIVE) { if (!l.ended && (t - l.last > 30e3 || t - l.started > LIVE_MAX_MS || isBanned(l.uid))) liveEnd(l); if (l.ended && t - l.endAt > 60e3) LIVE.delete(id); } }, 5000).unref();
+const liveSee = (me, l) => l.uid === me || (visible(me, l.uid) && canSee(me, l.uid));
+const liveViewers = l => { const t = Date.now(); let n = 0; for (const [u, ts] of l.viewers) { if (t - ts > 10e3) l.viewers.delete(u); else n++; } return n; };
+S("live_start", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, title = cleanText(b.title, 60).replace(/\n/g, " ") || "Canlı yayın", mime = String(b.mime || "");
+  if (!/^video\/webm;codecs=[a-z0-9.,]{3,40}$/.test(mime)) return res.status(400).json({ error: "bad_mime" });
+  if (!limit("slive:" + me, 10, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  for (const l of LIVE.values()) if (l.uid === me && !l.ended) liveEnd(l);
+  const id = "l" + rnd(6), key = rnd(12), t = Date.now();
+  LIVE.set(id, { id, uid: me, handle: req.prof.handle, avatar: req.prof.avatar, title, mime, key, started: t, last: t, segs: new Map(), segN: -1, waiters: [], viewers: new Map(), chat: [], cn: 0, hearts: 0, ended: false });
+  for (const f of db.prepare("SELECT follower FROM follows WHERE followee=? LIMIT 500").all(me)) notify(f.follower, me, "live", id, title, true);
+  res.json({ ok: true, id, key });
+});
+S("live_list", needProf, (req, res) => {
+  const me = req.user.id, fol = new Set(db.prepare("SELECT followee FROM follows WHERE follower=?").all(me).map(r => r.followee));
+  const out = [...LIVE.values()].filter(l => !l.ended && l.segN >= 0 && liveSee(me, l)).map(l => ({ id: l.id, handle: l.handle, avatar: mediaUrl(l.avatar), title: l.title, viewers: liveViewers(l), mine: l.uid === me, fol: fol.has(l.uid), started: l.started }));
+  out.sort((a, b) => (b.mine - a.mine) || (b.fol - a.fol) || (b.viewers - a.viewers));
+  res.json({ lives: out.slice(0, 30) });
+});
+S("live_state", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, l = LIVE.get(String(b.id || ""));
+  if (!l || !liveSee(me, l)) return res.status(404).json({ error: "not_found" });
+  if (l.uid !== me && !l.ended) { if (!l.viewers.has(me) && liveViewers(l) >= LIVE_MAX_VIEWERS) return res.status(429).json({ error: "full" }); l.viewers.set(me, Date.now()); }
+  const since = +b.since || 0;
+  res.json({ ended: l.ended, title: l.title, handle: l.handle, mime: l.mime, viewers: liveViewers(l), hearts: l.hearts, segN: l.segN, chat: l.chat.filter(m => m.n > since), cn: l.cn, mine: l.uid === me });
+});
+S("live_say", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, l = LIVE.get(String(b.id || "")), text = cleanText(b.text, 200).replace(/\n/g, " ");
+  if (!l || l.ended || !liveSee(me, l)) return res.status(404).json({ error: "not_found" });
+  if (!text) return res.status(400).json({ error: "empty" });
+  if (!limit("slsay:" + me, 20, 60e3)) return res.status(429).json({ error: "rate_limited" });
+  l.chat.push({ n: ++l.cn, handle: req.prof.handle, text, t: Date.now() }); if (l.chat.length > 150) l.chat.shift();
+  res.json({ ok: true });
+});
+S("live_heart", needProf, (req, res) => {
+  const me = req.user.id, l = LIVE.get(String((req.body || {}).id || ""));
+  if (!l || l.ended || !liveSee(me, l)) return res.status(404).json({ error: "not_found" });
+  if (limit("slh:" + me, 60, 10e3)) l.hearts++;
+  res.json({ ok: true, hearts: l.hearts });
+});
+S("live_end", needProf, (req, res) => {
+  const l = LIVE.get(String((req.body || {}).id || ""));
+  if (!l || l.uid !== req.user.id) return res.status(404).json({ error: "not_found" });
+  liveEnd(l); res.json({ ok: true });
+});
+async function liveUp(req, res, url) {
+  let ok = false; auth(req, res, () => { ok = true; }); if (!ok) return;
+  ok = false; socialMw(req, res, () => { ok = true; }); if (!ok) return;
+  const l = LIVE.get(url.searchParams.get("id") || ""), n = Math.floor(+url.searchParams.get("n"));
+  if (!l || l.uid !== req.user.id || l.key !== url.searchParams.get("key") || l.ended || !(n >= 0 && n < 1e6)) return res.json({ error: "bad_live" }, 400);
+  if (!limit("sluu:" + l.id, 120, 60e3)) return res.json({ error: "rate_limited" }, 429);
+  if ((+req.headers["content-length"] || 0) > LIVE_SEG_MAX) return res.json({ error: "too_large" }, 413);
+  const ch = []; let sz = 0;
+  try { for await (const c of req) { sz += c.length; if (sz > LIVE_SEG_MAX) return res.json({ error: "too_large" }, 413); ch.push(c); } } catch (e) { return; }
+  if (!sz) return res.json({ error: "empty" }, 400);
+  const buf = Buffer.concat(ch);
+  if (buf.length < 4 || buf.readUInt32BE(0) !== 0x1A45DFA3) return res.json({ error: "bad_segment" }, 400); // WebM (EBML) başlığı
+  l.segs.set(n, buf); if (n > l.segN) l.segN = n; l.last = Date.now();
+  for (const k of l.segs.keys()) if (k < l.segN - LIVE_KEEP) l.segs.delete(k);
+  for (const w of l.waiters.splice(0)) w();
+  res.json({ ok: true });
+}
+async function liveSeg(req, res, url) {
+  let ok = false; auth(req, res, () => { ok = true; }); if (!ok) return;
+  ok = false; socialMw(req, res, () => { ok = true; }); if (!ok) return;
+  const l = LIVE.get(url.searchParams.get("id") || ""); if (!l || !liveSee(req.user.id, l)) return res.json({ error: "not_found" }, 404);
+  let n = url.searchParams.get("n") === "latest" ? Math.max(0, l.segN - 1) : Math.floor(+url.searchParams.get("n"));
+  if (!(n >= 0)) return res.json({ error: "bad_n" }, 400);
+  const send = () => { const b = l.segs.get(n); res.statusCode = 200; res.setHeader("Content-Type", "video/webm"); res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Live-Seg", String(n)); res.end(b); };
+  if (l.segs.has(n)) return send();
+  if (l.ended) return res.json({ error: "ended" }, 410);
+  if (n <= l.segN) return res.json({ error: "gone", latest: l.segN }, 410);
+  await new Promise(done => { const to = setTimeout(done, 12000); l.waiters.push(() => { clearTimeout(to); done(); }); });
+  if (l.segs.has(n)) return send();
+  if (l.ended) return res.json({ error: "ended" }, 410);
+  res.statusCode = 204; res.end();
+}
+// ===== END LIVE =====
 
 
 
