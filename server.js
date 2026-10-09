@@ -459,7 +459,7 @@ function sigV4Presign({ method, host, pathName, keyId, secret, region, service, 
   const kd = hmac(hmac(hmac(hmac("AWS4" + secret, day), region), service), "aws4_request");
   return { query: cq + "&X-Amz-Signature=" + hmac(kd, sts).toString("hex"), signature: hmac(kd, sts).toString("hex") };
 }
-const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov" };
+const MEDIA_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/webm": "weba", "audio/mp4": "m4a", "audio/ogg": "ogg" };
 const MAX_IMG = 4 * 1024 * 1024, MAX_VID = +process.env.MAX_VIDEO_BYTES || 40 * 1024 * 1024;
 const mediaUrl = k => k && R2_ON ? R2.pub + "/" + k : "";
 const HANDLE_RE = /^[a-z0-9_.]{3,20}$/i;
@@ -488,7 +488,7 @@ const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.created, f.
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id)";
 
-S("me", (req, res) => res.json({ profile: pubProf(req.prof), storage: R2_ON, unread: db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n }));
+S("me", (req, res) => res.json({ profile: pubProf(req.prof), storage: R2_ON, unread: db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
 
 S("profile", (req, res) => {
   if (!limit("sprof:" + req.user.id, 20, 600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -509,8 +509,8 @@ S("upload", needProf, (req, res) => {
   if (!limit("sup:" + req.user.id, 40, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
   const type = String((req.body || {}).type || "").toLowerCase(), size = Math.floor(+(req.body || {}).size || 0), ext = MEDIA_EXT[type];
   if (!ext) return res.status(400).json({ error: "bad_type" });
-  const vid = type.startsWith("video/");
-  if (size <= 0 || size > (vid ? MAX_VID : MAX_IMG)) return res.status(413).json({ error: "too_large", max: vid ? MAX_VID : MAX_IMG });
+  const vid = type.startsWith("video/"), lim = vid ? MAX_VID : type.startsWith("audio/") ? 6 * 1024 * 1024 : MAX_IMG;
+  if (size <= 0 || size > lim) return res.status(413).json({ error: "too_large", max: lim });
   const key = "m/" + req.user.id + "/" + rnd(12) + "." + ext;
   const sg = sigV4Presign({ method: "PUT", host: R2.host, pathName: "/" + R2.bucket + "/" + key, keyId: R2.key, secret: R2.sec, region: "auto", service: "s3", date: new Date().toISOString(), expires: 600 });
   res.json({ key, url: "https://" + R2.host + "/" + R2.bucket + "/" + key + "?" + sg.query, type });
@@ -528,6 +528,7 @@ S("post", needProf, (req, res) => {
   }
   const id = "p" + rnd(8);
   db.prepare("INSERT INTO posts(id,user_id,kind,text,media,created) VALUES(?,?,?,?,?,?)").run(id, req.user.id, kind, text, kind === "text" ? "" : media, now());
+  afterPost(id, req.user.id, text);
   res.json({ ok: true, id });
 });
 
@@ -552,7 +553,7 @@ S("like", needProf, (req, res) => {
   if (!limit("slike:" + req.user.id, 200, 600e3)) return res.status(429).json({ error: "rate_limited" });
   const id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id);
   if (!p || blockedEither(req.user.id, p.user_id)) return res.status(404).json({ error: "not_found" });
-  if ((req.body || {}).on) db.prepare("INSERT OR IGNORE INTO likes(post_id,user_id) VALUES(?,?)").run(id, req.user.id); else db.prepare("DELETE FROM likes WHERE post_id=? AND user_id=?").run(id, req.user.id);
+  if ((req.body || {}).on) { db.prepare("INSERT OR IGNORE INTO likes(post_id,user_id) VALUES(?,?)").run(id, req.user.id); notify(p.user_id, req.user.id, "like", id, "", true); } else db.prepare("DELETE FROM likes WHERE post_id=? AND user_id=?").run(id, req.user.id);
   res.json({ likes: db.prepare("SELECT COUNT(*) n FROM likes WHERE post_id=?").get(id).n });
 });
 
@@ -562,6 +563,7 @@ S("comment", needProf, (req, res) => {
   if (!p || blockedEither(req.user.id, p.user_id)) return res.status(404).json({ error: "not_found" });
   if (!text) return res.status(400).json({ error: "empty" });
   db.prepare("INSERT INTO comments(id,post_id,user_id,text,created) VALUES(?,?,?,?,?)").run("c" + rnd(8), id, req.user.id, text, now());
+  notify(p.user_id, req.user.id, "comment", id, text); mentionNotify(text, req.user.id, id);
   res.json({ ok: true });
 });
 S("comments", needProf, (req, res) => {
@@ -579,7 +581,8 @@ S("delcomment", needProf, (req, res) => {
 S("delete", needProf, (req, res) => {
   const id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id);
   if (!p || p.user_id !== req.user.id) return res.status(404).json({ error: "not_found" });
-  db.prepare("DELETE FROM posts WHERE id=?").run(id); res.json({ ok: true });
+  const pm = db.prepare("SELECT media FROM posts WHERE id=?").get(id);
+  db.prepare("DELETE FROM posts WHERE id=?").run(id); if (pm && pm.media) r2Del(pm.media); res.json({ ok: true });
 });
 
 S("user", needProf, (req, res) => {
@@ -600,7 +603,7 @@ S("follow", needProf, (req, res) => {
   if (!limit("sfol:" + req.user.id, 100, 3600e3)) return res.status(429).json({ error: "rate_limited" });
   const p = profByHandle((req.body || {}).handle);
   if (!p || p.user_id === req.user.id || blockedEither(req.user.id, p.user_id)) return res.status(404).json({ error: "not_found" });
-  if ((req.body || {}).on) db.prepare("INSERT OR IGNORE INTO follows(follower,followee,created) VALUES(?,?,?)").run(req.user.id, p.user_id, now()); else db.prepare("DELETE FROM follows WHERE follower=? AND followee=?").run(req.user.id, p.user_id);
+  if ((req.body || {}).on) { db.prepare("INSERT OR IGNORE INTO follows(follower,followee,created) VALUES(?,?,?)").run(req.user.id, p.user_id, now()); notify(p.user_id, req.user.id, "follow", "", "", true); } else db.prepare("DELETE FROM follows WHERE follower=? AND followee=?").run(req.user.id, p.user_id);
   res.json({ ok: true, followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(p.user_id).n });
 });
 S("block", needProf, (req, res) => {
@@ -612,7 +615,7 @@ S("block", needProf, (req, res) => {
 });
 S("report", needProf, (req, res) => {
   if (!limit("srep:" + req.user.id, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
-  const b = req.body || {}, kind = ["post", "user", "comment", "msg"].includes(b.kind) ? b.kind : "";
+  const b = req.body || {}, kind = ["post", "user", "comment", "msg", "story", "group"].includes(b.kind) ? b.kind : "";
   if (!kind) return res.status(400).json({ error: "bad_kind" });
   db.prepare("INSERT INTO reports(id,reporter,kind,target,reason,created) VALUES(?,?,?,?,?,?)").run("r" + rnd(8), req.user.id, kind, String(b.target || "").slice(0, 60), cleanText(b.reason, 300), now());
   res.json({ ok: true });
@@ -636,13 +639,14 @@ S("thread", needProf, (req, res) => {
   const after = +(req.body || {}).after || 0;
   const rows = db.prepare("SELECT id, from_id, text, media, created FROM msgs WHERE id>? AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) ORDER BY id DESC LIMIT 60").all(after, me, p.user_id, p.user_id, me).reverse();
   db.prepare("UPDATE msgs SET read=1 WHERE from_id=? AND to_id=? AND read=0").run(p.user_id, me);
-  res.json({ msgs: rows.map(r => ({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created })), handle: p.handle, avatar: mediaUrl(p.avatar) });
+  const rm = reactMap("d", rows.map(r => r.id), me);
+  res.json({ msgs: rows.map(r => withRe({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created }, rm)), handle: p.handle, avatar: mediaUrl(p.avatar), typing: typing("d:" + p.user_id + ":" + me) });
 });
 S("send", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle), text = cleanText(b.text, 1000), media = String(b.media || "");
   if (!limit("smsg:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
   if (!p || p.user_id === me || blockedEither(me, p.user_id) || isBanned(p.user_id)) return res.status(404).json({ error: "not_found" });
-  if (media && (!R2_ON || !media.startsWith("m/" + me + "/") || !/\.(jpg|png|webp)$/.test(media) || media.length > 120)) return res.status(400).json({ error: "bad_media" });
+  if (media && (!R2_ON || !media.startsWith("m/" + me + "/") || !MSG_MEDIA_RE.test(media) || media.length > 120)) return res.status(400).json({ error: "bad_media" });
   if (!text && !media) return res.status(400).json({ error: "empty" });
   const r = db.prepare("INSERT INTO msgs(from_id,to_id,text,media,created) VALUES(?,?,?,?,?)").run(me, p.user_id, text, media, now());
   res.json({ ok: true, id: Number(r.lastInsertRowid) });
@@ -659,7 +663,8 @@ app.post("/api/admin/reports", (req, res) => { if (!admOk(req, res)) return; res
 app.post("/api/admin/remove", (req, res) => {
   if (!admOk(req, res)) return;
   const b = req.body || {};
-  if (b.post) db.prepare("DELETE FROM posts WHERE id=?").run(String(b.post));
+  if (b.post) { const pm = db.prepare("SELECT media FROM posts WHERE id=?").get(String(b.post)); db.prepare("DELETE FROM posts WHERE id=?").run(String(b.post)); if (pm && pm.media) r2Del(pm.media); }
+  if (b.story) { const sm = db.prepare("SELECT media FROM stories WHERE id=?").get(String(b.story)); db.prepare("DELETE FROM stories WHERE id=?").run(String(b.story)); if (sm && sm.media) r2Del(sm.media); }
   if (b.comment) db.prepare("DELETE FROM comments WHERE id=?").run(String(b.comment));
   if (b.ban) { const p = profByHandle(b.ban); if (p) db.prepare("INSERT OR REPLACE INTO bans(user_id,reason,created) VALUES(?,?,?)").run(p.user_id, cleanText(b.reason, 200), now()); }
   if (b.unban) { const p = profByHandle(b.unban); if (p) db.prepare("DELETE FROM bans WHERE user_id=?").run(p.user_id); }
@@ -667,6 +672,242 @@ app.post("/api/admin/remove", (req, res) => {
   res.json({ ok: true });
 });
 // ===== END SOCIAL =====
+// ===== BEGIN SOCIAL2 =====
+// Pusula Medya 2: hikâyeler (24 saat), bildirimler, #etiket ve @anma, keşfet, grup sohbeti, mesaja tepki, yazıyor göstergesi, sesli/video mesaj.
+db.exec(`
+CREATE TABLE IF NOT EXISTS stories(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', media TEXT NOT NULL DEFAULT '', bg INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, expires INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS stories_u ON stories(user_id, expires);
+CREATE TABLE IF NOT EXISTS story_views(story_id TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL, PRIMARY KEY(story_id, user_id));
+CREATE TABLE IF NOT EXISTS notifs(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, actor TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, type TEXT NOT NULL, post_id TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS notifs_u ON notifs(user_id, id);
+CREATE TABLE IF NOT EXISTS tags(post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, tag TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(post_id, tag));
+CREATE INDEX IF NOT EXISTS tags_t ON tags(tag, created DESC);
+CREATE TABLE IF NOT EXISTS chat_groups(id TEXT PRIMARY KEY, name TEXT NOT NULL, owner TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS group_members(group_id TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, last_read INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(group_id, user_id));
+CREATE INDEX IF NOT EXISTS gm_u ON group_members(user_id);
+CREATE TABLE IF NOT EXISTS gmsgs(id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE, from_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL DEFAULT '', media TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS gmsgs_g ON gmsgs(group_id, id);
+CREATE TABLE IF NOT EXISTS reacts(kind TEXT NOT NULL, msg_id INTEGER NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, emoji TEXT NOT NULL, PRIMARY KEY(kind, msg_id, user_id));
+`);
+const MSG_MEDIA_RE = /\.(jpg|png|webp|mp4|webm|mov|weba|m4a|ogg)$/;
+const EMOJIS = ["❤️", "😂", "😮", "😢", "👍", "🔥"];
+const STORY_MS = 24 * 3600e3;
+const R2_BASE = (process.env.R2_ENDPOINT_BASE || (R2.host ? "https://" + R2.host : "")).replace(/\/+$/, "");
+async function r2Del(key) { // depolamayı temiz tutar (ücretsiz kota 10 GB); hata verirse sessiz geçer
+  if (!R2_ON || !/^m\/[A-Za-z0-9]+\/[A-Za-z0-9]+\.[a-z0-9]{2,5}$/.test(String(key || ""))) return;
+  try {
+    const sg = sigV4Presign({ method: "DELETE", host: R2.host, pathName: "/" + R2.bucket + "/" + key, keyId: R2.key, secret: R2.sec, region: "auto", service: "s3", date: new Date().toISOString(), expires: 60 });
+    await fetch(R2_BASE + "/" + R2.bucket + "/" + key + "?" + sg.query, { method: "DELETE", signal: AbortSignal.timeout(10000) });
+  } catch (e) { /* önemli değil */ }
+}
+const TAG_RE = /#([\p{L}\p{N}_]{2,30})/gu, MEN_RE = /@([a-z0-9_.]{3,20})/gi;
+const tagsOf = t => [...new Set([...String(t || "").matchAll(TAG_RE)].map(m => m[1].toLocaleLowerCase("tr")))].slice(0, 10);
+function notify(to, actor, type, postId, text, once) {
+  if (!to || to === actor || isBanned(actor) || blockedEither(to, actor)) return;
+  if (once && db.prepare("SELECT 1 FROM notifs WHERE user_id=? AND actor=? AND type=? AND post_id=?").get(to, actor, type, postId || "")) return;
+  db.prepare("INSERT INTO notifs(user_id,actor,type,post_id,text,created) VALUES(?,?,?,?,?,?)").run(to, actor, type, postId || "", cleanText(text, 80).replace(/\n/g, " "), now());
+}
+function mentionNotify(text, actor, postId) {
+  const seen = new Set();
+  for (const m of String(text || "").matchAll(MEN_RE)) { const h = m[1].toLowerCase(); if (seen.has(h) || seen.size >= 5) continue; seen.add(h); const p = profByHandle(h); if (p) notify(p.user_id, actor, "mention", postId, text); }
+}
+function afterPost(id, uid, text) {
+  for (const t of tagsOf(text)) db.prepare("INSERT OR IGNORE INTO tags(post_id,tag,created) VALUES(?,?,?)").run(id, t, now());
+  mentionNotify(text, uid, id);
+}
+const TYP = new Map(); // yazıyor göstergesi (bellekte)
+const typing = k => (TYP.get(k) || 0) > now() - 5000;
+function purge() {
+  const t = now(), old = db.prepare("SELECT id, media FROM stories WHERE expires<?").all(t);
+  for (const s of old) { if (s.media) r2Del(s.media); db.prepare("DELETE FROM stories WHERE id=?").run(s.id); }
+  db.prepare("DELETE FROM notifs WHERE created<?").run(t - 30 * 864e5);
+  for (const [k, v] of TYP) if (v < t - 60000) TYP.delete(k);
+}
+setInterval(purge, 10 * 60e3).unref();
+const visible = (me, owner) => owner === me || (!blockedEither(me, owner) && !isBanned(owner));
+const mediaLabel = m => /\.(weba|m4a|ogg)$/.test(m) ? "🎤 Sesli mesaj" : /\.(mp4|webm|mov)$/.test(m) ? "🎬 Video" : "📷 Fotoğraf";
+function reactMap(kind, ids, me) {
+  const out = new Map(); if (!ids.length) return out;
+  for (const r of db.prepare(`SELECT msg_id, user_id, emoji FROM reacts WHERE kind=? AND msg_id IN (${ids.map(() => "?").join(",")})`).all(kind, ...ids)) {
+    const o = out.get(r.msg_id) || { re: {}, my: "" }; o.re[r.emoji] = (o.re[r.emoji] || 0) + 1; if (r.user_id === me) o.my = r.emoji; out.set(r.msg_id, o);
+  }
+  return out;
+}
+const withRe = (m, rm) => Object.assign(m, rm.get(m.id) || { re: {}, my: "" });
+
+// --- Hikâyeler
+S("story_new", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, kind = ["photo", "video", "text"].includes(b.kind) ? b.kind : "", text = cleanText(b.text, 200), media = String(b.media || "");
+  if (!kind) return res.status(400).json({ error: "bad_kind" });
+  if (!limit("sstory:" + me, 30, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (kind === "text") { if (!text) return res.status(400).json({ error: "empty" }); }
+  else {
+    if (!R2_ON) return res.status(501).json({ error: "storage_off" });
+    const okExt = kind === "photo" ? /\.(jpg|png|webp)$/ : /\.(mp4|webm|mov)$/;
+    if (!media.startsWith("m/" + me + "/") || !okExt.test(media) || media.length > 120) return res.status(400).json({ error: "bad_media" });
+  }
+  const id = "s" + rnd(8), t = now();
+  db.prepare("INSERT INTO stories(id,user_id,kind,text,media,bg,created,expires) VALUES(?,?,?,?,?,?,?,?)").run(id, me, kind, text, kind === "text" ? "" : media, Math.min(7, Math.max(0, Math.floor(+b.bg || 0))), t, t + STORY_MS);
+  res.json({ ok: true, id });
+});
+S("stories", needProf, (req, res) => {
+  purge(); const me = req.user.id;
+  const rows = db.prepare(`SELECT s.id, s.user_id, s.kind, s.text, s.media, s.bg, s.created, f.handle, f.avatar FROM stories s JOIN profiles f ON f.user_id=s.user_id
+    WHERE s.expires>? AND (s.user_id=? OR s.user_id IN (SELECT followee FROM follows WHERE follower=?))
+    AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=s.user_id) OR (b.blocker=s.user_id AND b.blocked=?))
+    AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=s.user_id) ORDER BY s.created`).all(now(), me, me, me, me);
+  const seen = new Set(rows.length ? db.prepare(`SELECT story_id FROM story_views WHERE user_id=? AND story_id IN (${rows.map(() => "?").join(",")})`).all(me, ...rows.map(r => r.id)).map(r => r.story_id) : []);
+  const g = new Map();
+  for (const r of rows) {
+    const o = g.get(r.user_id) || { handle: r.handle, avatar: mediaUrl(r.avatar), own: r.user_id === me, items: [], last: 0 };
+    o.items.push({ id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), bg: r.bg, created: r.created, seen: seen.has(r.id) || r.user_id === me }); o.last = r.created; g.set(r.user_id, o);
+  }
+  const out = [...g.values()].map(o => Object.assign(o, { seen: o.items.every(i => i.seen) }));
+  out.sort((a, b) => (b.own - a.own) || (a.seen - b.seen) || (b.last - a.last));
+  res.json({ stories: out });
+});
+S("story_view", needProf, (req, res) => {
+  const s = db.prepare("SELECT id, user_id FROM stories WHERE id=? AND expires>?").get(String((req.body || {}).id || ""), now());
+  if (!s || !visible(req.user.id, s.user_id) || (s.user_id !== req.user.id && !db.prepare("SELECT 1 FROM follows WHERE follower=? AND followee=?").get(req.user.id, s.user_id))) return res.status(404).json({ error: "not_found" });
+  if (s.user_id !== req.user.id) db.prepare("INSERT OR IGNORE INTO story_views(story_id,user_id,created) VALUES(?,?,?)").run(s.id, req.user.id, now());
+  res.json({ ok: true });
+});
+S("story_viewers", needProf, (req, res) => {
+  const s = db.prepare("SELECT id FROM stories WHERE id=? AND user_id=?").get(String((req.body || {}).id || ""), req.user.id);
+  if (!s) return res.status(404).json({ error: "not_found" });
+  const rows = db.prepare("SELECT f.handle, f.avatar FROM story_views v JOIN profiles f ON f.user_id=v.user_id WHERE v.story_id=? ORDER BY v.created DESC LIMIT 100").all(s.id);
+  res.json({ viewers: rows.map(r => ({ handle: r.handle, avatar: mediaUrl(r.avatar) })) });
+});
+S("story_delete", needProf, (req, res) => {
+  const s = db.prepare("SELECT id, media FROM stories WHERE id=? AND user_id=?").get(String((req.body || {}).id || ""), req.user.id);
+  if (!s) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM stories WHERE id=?").run(s.id); if (s.media) r2Del(s.media); res.json({ ok: true });
+});
+
+// --- Bildirimler
+S("notifs", needProf, (req, res) => {
+  const me = req.user.id;
+  const rows = db.prepare("SELECT n.id, n.actor, n.type, n.post_id, n.text, n.created, n.read, f.handle, f.avatar FROM notifs n JOIN profiles f ON f.user_id=n.actor WHERE n.user_id=? ORDER BY n.id DESC LIMIT 50").all(me);
+  res.json({ notifs: rows.filter(r => visible(me, r.actor)).map(r => ({ id: r.id, type: r.type, post: r.post_id, text: r.text, created: r.created, read: !!r.read, handle: r.handle, avatar: mediaUrl(r.avatar) })) });
+});
+S("notifs_read", needProf, (req, res) => { db.prepare("UPDATE notifs SET read=1 WHERE user_id=? AND read=0").run(req.user.id); res.json({ ok: true }); });
+
+// --- Etiket, tek gönderi, keşfet
+S("tag", needProf, (req, res) => {
+  const me = req.user.id, tag = String((req.body || {}).tag || "").replace(/^#/, "").toLocaleLowerCase("tr"), before = +(req.body || {}).before || now() + 1;
+  if (!/^[\p{L}\p{N}_]{2,30}$/u.test(tag)) return res.status(400).json({ error: "bad_tag" });
+  const rows = db.prepare(`${POST_SEL} JOIN tags t ON t.post_id=p.id WHERE t.tag=? AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(tag, before, me, me);
+  res.json({ tag, posts: postRows(rows, me) });
+});
+S("getpost", needProf, (req, res) => {
+  const me = req.user.id, rows = db.prepare(`${POST_SEL} WHERE p.id=? ${NOT_BLOCKED} ${NOT_BANNED}`).all(String((req.body || {}).id || ""), me, me);
+  if (!rows.length) return res.status(404).json({ error: "not_found" });
+  res.json({ post: postRows(rows, me)[0] });
+});
+S("explore", needProf, (req, res) => {
+  const me = req.user.id, t = now();
+  const tags = db.prepare("SELECT t.tag, COUNT(*) n FROM tags t JOIN posts p ON p.id=t.post_id WHERE t.created>? AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) GROUP BY t.tag ORDER BY n DESC, MAX(t.created) DESC LIMIT 10").all(t - 7 * 864e5);
+  const rows = db.prepare(`${POST_SEL} WHERE p.created>? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY ((SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id)*2 + (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id)) DESC, p.created DESC LIMIT 18`).all(t - 30 * 864e5, me, me);
+  const ppl = db.prepare("SELECT f.user_id, f.handle, f.bio, f.avatar, (SELECT COUNT(*) FROM follows WHERE followee=f.user_id) n FROM profiles f WHERE f.user_id<>? AND f.user_id NOT IN (SELECT followee FROM follows WHERE follower=?) AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=f.user_id) ORDER BY n DESC, f.created DESC LIMIT 12").all(me, me);
+  res.json({ tags: tags.map(r => ({ tag: r.tag, n: r.n })), posts: postRows(rows, me), people: ppl.filter(r => !blockedEither(me, r.user_id)).slice(0, 8).map(r => ({ handle: r.handle, bio: r.bio, avatar: mediaUrl(r.avatar), followers: r.n })) });
+});
+
+// --- Sohbet listesi (birebir + grup), tepki, yazıyor
+function dmChats(me) {
+  const rows = db.prepare(`SELECT m.id, m.from_id, m.to_id, m.text, m.media, m.created FROM msgs m WHERE m.id IN (SELECT MAX(id) FROM msgs WHERE from_id=? OR to_id=? GROUP BY CASE WHEN from_id=? THEN to_id ELSE from_id END) ORDER BY m.id DESC LIMIT 50`).all(me, me, me), out = [];
+  for (const r of rows) {
+    const other = r.from_id === me ? r.to_id : r.from_id, p = profOf(other);
+    if (!p || isBanned(other) || blockedEither(me, other)) continue;
+    out.push({ type: "dm", handle: p.handle, avatar: mediaUrl(p.avatar), text: r.text || (r.media ? mediaLabel(r.media) : ""), created: r.created, mine: r.from_id === me, unread: db.prepare("SELECT COUNT(*) n FROM msgs WHERE from_id=? AND to_id=? AND read=0").get(other, me).n });
+  }
+  return out;
+}
+function groupChats(me) {
+  const out = [];
+  for (const g of db.prepare("SELECT g.id, g.name, g.created, m.last_read FROM group_members m JOIN chat_groups g ON g.id=m.group_id WHERE m.user_id=?").all(me)) {
+    const last = db.prepare("SELECT x.text, x.media, x.created, x.from_id, f.handle FROM gmsgs x JOIN profiles f ON f.user_id=x.from_id WHERE x.group_id=? ORDER BY x.id DESC LIMIT 1").get(g.id);
+    out.push({ type: "group", id: g.id, name: g.name, members: db.prepare("SELECT COUNT(*) n FROM group_members WHERE group_id=?").get(g.id).n,
+      text: last ? (last.text || mediaLabel(last.media)) : "Grup oluşturuldu", from: last ? last.handle : "", mine: !!last && last.from_id === me, created: last ? last.created : g.created,
+      unread: db.prepare("SELECT COUNT(*) n FROM gmsgs WHERE group_id=? AND id>? AND from_id<>?").get(g.id, g.last_read, me).n });
+  }
+  return out;
+}
+S("chats", needProf, (req, res) => {
+  const me = req.user.id, all = dmChats(me).concat(groupChats(me)).sort((a, b) => b.created - a.created);
+  res.json({ chats: all, unread: all.reduce((n, c) => n + c.unread, 0) });
+});
+S("react", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, kind = b.kind === "g" ? "g" : "d", id = Math.floor(+b.id || 0), emoji = String(b.emoji || "");
+  if (!limit("sreact:" + me, 300, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (emoji && !EMOJIS.includes(emoji)) return res.status(400).json({ error: "bad_emoji" });
+  let ok = false;
+  if (kind === "d") { const m = db.prepare("SELECT from_id, to_id FROM msgs WHERE id=?").get(id); ok = !!m && (m.from_id === me || m.to_id === me) && !blockedEither(m.from_id, m.to_id); }
+  else { const m = db.prepare("SELECT group_id FROM gmsgs WHERE id=?").get(id); ok = !!m && !!db.prepare("SELECT 1 FROM group_members WHERE group_id=? AND user_id=?").get(m.group_id, me); }
+  if (!ok) return res.status(404).json({ error: "not_found" });
+  if (emoji) db.prepare("INSERT OR REPLACE INTO reacts(kind,msg_id,user_id,emoji) VALUES(?,?,?,?)").run(kind, id, me, emoji); else db.prepare("DELETE FROM reacts WHERE kind=? AND msg_id=? AND user_id=?").run(kind, id, me);
+  res.json(Object.assign({ ok: true }, reactMap(kind, [id], me).get(id) || { re: {}, my: "" }));
+});
+S("typing", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (!limit("styp:" + me, 200, 60e3)) return res.status(429).json({ error: "rate_limited" });
+  if (b.group) { if (db.prepare("SELECT 1 FROM group_members WHERE group_id=? AND user_id=?").get(String(b.group), me)) TYP.set("g:" + b.group + ":" + me, now()); }
+  else { const p = profByHandle(b.handle); if (p && !blockedEither(me, p.user_id)) TYP.set("d:" + me + ":" + p.user_id, now()); }
+  res.json({ ok: true });
+});
+
+// --- Gruplar
+const isMember = (gid, uid) => !!db.prepare("SELECT 1 FROM group_members WHERE group_id=? AND user_id=?").get(String(gid || ""), uid);
+S("gcreate", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, name = cleanText(b.name, 40).replace(/\n/g, " ");
+  if (!name) return res.status(400).json({ error: "bad_name" });
+  if (!limit("sgrp:" + me, 10, 24 * 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const ids = new Set();
+  for (const h of (Array.isArray(b.members) ? b.members : []).slice(0, 30)) { const p = profByHandle(String(h || "").replace(/^@/, "")); if (p && p.user_id !== me && visible(me, p.user_id)) ids.add(p.user_id); }
+  if (!ids.size) return res.status(400).json({ error: "no_members" });
+  if (ids.size > 19) return res.status(400).json({ error: "too_many" });
+  const id = "g" + rnd(8);
+  db.prepare("INSERT INTO chat_groups(id,name,owner,created) VALUES(?,?,?,?)").run(id, name, me, now());
+  for (const u of [me, ...ids]) db.prepare("INSERT INTO group_members(group_id,user_id,last_read) VALUES(?,?,0)").run(id, u);
+  res.json({ ok: true, id });
+});
+S("gthread", needProf, (req, res) => {
+  const me = req.user.id, gid = String((req.body || {}).id || ""), g = db.prepare("SELECT id, name, owner FROM chat_groups WHERE id=?").get(gid);
+  if (!g || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+  const after = +(req.body || {}).after || 0;
+  const rows = db.prepare("SELECT x.id, x.from_id, x.text, x.media, x.created, f.handle FROM gmsgs x JOIN profiles f ON f.user_id=x.from_id WHERE x.group_id=? AND x.id>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker=? AND b.blocked=x.from_id) ORDER BY x.id DESC LIMIT 60").all(gid, after, me).reverse();
+  const top = db.prepare("SELECT MAX(id) m FROM gmsgs WHERE group_id=?").get(gid).m || 0;
+  db.prepare("UPDATE group_members SET last_read=? WHERE group_id=? AND user_id=?").run(top, gid, me);
+  const rm = reactMap("g", rows.map(r => r.id), me), mem = db.prepare("SELECT m.user_id, f.handle FROM group_members m JOIN profiles f ON f.user_id=m.user_id WHERE m.group_id=?").all(gid);
+  res.json({ name: g.name, owner: g.owner === me, members: mem.map(x => x.handle), typing: mem.filter(x => x.user_id !== me && typing("g:" + gid + ":" + x.user_id)).map(x => x.handle),
+    msgs: rows.map(r => withRe({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created }, rm)) });
+});
+S("gsend", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, gid = String(b.id || ""), text = cleanText(b.text, 1000), media = String(b.media || "");
+  if (!isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+  if (!limit("sgmsg:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (media && (!R2_ON || !media.startsWith("m/" + me + "/") || !MSG_MEDIA_RE.test(media) || media.length > 120)) return res.status(400).json({ error: "bad_media" });
+  if (!text && !media) return res.status(400).json({ error: "empty" });
+  const r = db.prepare("INSERT INTO gmsgs(group_id,from_id,text,media,created) VALUES(?,?,?,?,?)").run(gid, me, text, media, now());
+  db.prepare("UPDATE group_members SET last_read=? WHERE group_id=? AND user_id=?").run(Number(r.lastInsertRowid), gid, me);
+  res.json({ ok: true, id: Number(r.lastInsertRowid) });
+});
+S("gadd", needProf, (req, res) => {
+  const me = req.user.id, gid = String((req.body || {}).id || ""), g = db.prepare("SELECT owner FROM chat_groups WHERE id=?").get(gid);
+  if (!g || g.owner !== me) return res.status(404).json({ error: "not_found" });
+  const p = profByHandle(String((req.body || {}).handle || "").replace(/^@/, ""));
+  if (!p || !visible(me, p.user_id)) return res.status(404).json({ error: "no_user" });
+  if (db.prepare("SELECT COUNT(*) n FROM group_members WHERE group_id=?").get(gid).n >= 20) return res.status(400).json({ error: "too_many" });
+  db.prepare("INSERT OR IGNORE INTO group_members(group_id,user_id,last_read) VALUES(?,?,0)").run(gid, p.user_id); res.json({ ok: true });
+});
+S("gleave", needProf, (req, res) => {
+  const me = req.user.id, gid = String((req.body || {}).id || ""), g = db.prepare("SELECT owner FROM chat_groups WHERE id=?").get(gid);
+  if (!g || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM group_members WHERE group_id=? AND user_id=?").run(gid, me);
+  const next = db.prepare("SELECT user_id FROM group_members WHERE group_id=? LIMIT 1").get(gid);
+  if (!next) db.prepare("DELETE FROM chat_groups WHERE id=?").run(gid); else if (g.owner === me) db.prepare("UPDATE chat_groups SET owner=? WHERE id=?").run(next.user_id, gid);
+  res.json({ ok: true });
+});
+// ===== END SOCIAL2 =====
 
 // Uygulamanın kendisini de sun (aynı adres, ek ayar gerekmez)
 // ===== BEGIN GOOGLE =====
