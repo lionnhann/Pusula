@@ -165,7 +165,7 @@ function readJson(req, max) {
     req.on("error", reject);
   });
 }
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json", ".json": "application/json", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8" };
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json", ".json": "application/json", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8", ".xml": "application/xml; charset=utf-8" };
 const server = http.createServer(async (req, res) => {
   res.json = (o, st) => { res.statusCode = st || res.statusCode || 200; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.setHeader("Cache-Control", "no-store"); res.end(JSON.stringify(o)); };
   res.status = c => { res.statusCode = c; return res; };
@@ -2723,6 +2723,8 @@ function serveStatic(req, res, pathname) {
   let p;
   try { p = decodeURIComponent(pathname); } catch (e) { return res.json({ error: "bad_request" }, 400); }
   if (p === "/" || p === "/index.html") { res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(req.method === "HEAD" ? undefined : INDEX); }
+  const lm = /^\/(en|de|es|fr|pt|ru|ar)\/?$/.exec(p); // dile özel tanıtım sayfaları (arama motorları için)
+  if (lm) { const lf = path.join(PUB, lm[1], "index.html"); if (fs.existsSync(lf)) { res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "public, max-age=3600"); return res.end(req.method === "HEAD" ? undefined : fs.readFileSync(lf)); } }
   const f = path.normalize(path.join(PUB, p));
   if (!f.startsWith(PUB + path.sep) || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
     res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(INDEX); // SPA
