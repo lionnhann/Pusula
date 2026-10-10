@@ -20,7 +20,7 @@ server.listen(0, async () => {
     ok(/verification code/.test(last()) && /Hello Ann/.test(last()), "english verify mail via body lang");
     await call("/api/register", { email: "b@x.com", password: "parola-123", name: "Bora", lang: "tr" }); await new Promise(r => setTimeout(r, 50));
     ok(/doğrulama kodu/.test(last()), "turkish verify mail via body lang");
-    await call("/api/register", { email: "c@x.com", password: "parola-123", name: "Cem" }, null, { "Accept-Language": "de-DE,de;q=0.9" }); await new Promise(r => setTimeout(r, 50));
+    await call("/api/register", { email: "c@x.com", password: "parola-123", name: "Cem" }, null, { "Accept-Language": "it-IT,it;q=0.9" }); await new Promise(r => setTimeout(r, 50));
     ok(/verification code/.test(last()), "accept-language fallback -> english");
     await call("/api/register", { email: "d@x.com", password: "parola-123", name: "Deniz" }, null, { "Accept-Language": "tr-TR,tr;q=0.9" }); await new Promise(r => setTimeout(r, 50));
     ok(/doğrulama kodu/.test(last()), "accept-language tr -> turkish");

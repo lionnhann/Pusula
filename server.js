@@ -136,10 +136,22 @@ function checkCode(userId, kind, code) {
   db.prepare("DELETE FROM codes WHERE user_id=? AND kind=?").run(userId, kind);
   return true;
 }
-const mailLang = req => { const b = (req && req.body) || {}; if (b.lang === "en" || b.lang === "tr") return b.lang; const al = String((req && req.headers && req.headers["accept-language"]) || "").toLowerCase(); return !al || al === "*" || /(^|,)\s*tr/.test(al) ? "tr" : "en"; };
-const sendVerify = (u, lang) => lang === "en"
-  ? sendMail(u.email, "Pusula verification code", `Hello ${u.name || ""},\n\nYour Pusula verification code: ${makeCode(u.id, "verify", 30)}\nThe code is valid for 30 minutes. If you did not request this, you can ignore this email.`)
-  : sendMail(u.email, "Pusula doğrulama kodu", `Merhaba ${u.name || ""},\n\nPusula doğrulama kodun: ${makeCode(u.id, "verify", 30)}\nKod 30 dakika geçerlidir. Bu isteği sen yapmadıysan bu e-postayı yok say.`);
+const MAIL_LANGS = ["tr", "en", "de", "es", "fr", "pt", "ru", "ar", "az", "id", "ja"];
+const mailLang = req => { const b = (req && req.body) || {}; if (MAIL_LANGS.includes(b.lang)) return b.lang; const al = String((req && req.headers && req.headers["accept-language"]) || "").toLowerCase(); if (!al || al === "*") return "tr"; for (const part of al.split(",")) { const c = part.trim().slice(0, 2); if (MAIL_LANGS.includes(c)) return c; } return "en"; };
+const MAIL_T = {
+  tr: { vs: "Pusula doğrulama kodu", vb: (n, c) => `Merhaba ${n},\n\nPusula doğrulama kodun: ${c}\nKod 30 dakika geçerlidir. Bu isteği sen yapmadıysan bu e-postayı yok say.`, rs: "Pusula parola sıfırlama kodu", rb: (n, c) => `Merhaba ${n},\n\nParola sıfırlama kodun: ${c}\nKod 15 dakika geçerlidir. Bu isteği sen yapmadıysan bu e-postayı yok say; parolan değişmez.` },
+  en: { vs: "Pusula verification code", vb: (n, c) => `Hello ${n},\n\nYour Pusula verification code: ${c}\nThe code is valid for 30 minutes. If you did not request this, you can ignore this email.`, rs: "Pusula password reset code", rb: (n, c) => `Hello ${n},\n\nYour password reset code: ${c}\nThe code is valid for 15 minutes. If you did not request this, ignore this email; your password will not change.` },
+  de: { vs: "Pusula-Bestätigungscode", vb: (n, c) => `Hallo ${n},\n\ndein Pusula-Bestätigungscode: ${c}\nDer Code ist 30 Minuten gültig. Wenn du das nicht angefordert hast, kannst du diese E-Mail ignorieren.`, rs: "Pusula-Code zum Zurücksetzen des Passworts", rb: (n, c) => `Hallo ${n},\n\ndein Code zum Zurücksetzen des Passworts: ${c}\nDer Code ist 15 Minuten gültig. Wenn du das nicht angefordert hast, ignoriere diese E-Mail; dein Passwort bleibt unverändert.` },
+  es: { vs: "Código de verificación de Pusula", vb: (n, c) => `Hola ${n},\n\ntu código de verificación de Pusula: ${c}\nEl código es válido durante 30 minutos. Si no lo solicitaste, puedes ignorar este correo.`, rs: "Código para restablecer la contraseña de Pusula", rb: (n, c) => `Hola ${n},\n\ntu código para restablecer la contraseña: ${c}\nEl código es válido durante 15 minutos. Si no lo solicitaste, ignora este correo; tu contraseña no cambiará.` },
+  fr: { vs: "Code de vérification Pusula", vb: (n, c) => `Bonjour ${n},\n\nton code de vérification Pusula : ${c}\nLe code est valable 30 minutes. Si tu n'es pas à l'origine de cette demande, ignore cet e-mail.`, rs: "Code de réinitialisation du mot de passe Pusula", rb: (n, c) => `Bonjour ${n},\n\nton code de réinitialisation du mot de passe : ${c}\nLe code est valable 15 minutes. Si tu n'es pas à l'origine de cette demande, ignore cet e-mail ; ton mot de passe ne changera pas.` },
+  pt: { vs: "Código de verificação do Pusula", vb: (n, c) => `Olá ${n},\n\nseu código de verificação do Pusula: ${c}\nO código é válido por 30 minutos. Se você não solicitou, pode ignorar este e-mail.`, rs: "Código para redefinir a senha do Pusula", rb: (n, c) => `Olá ${n},\n\nseu código para redefinir a senha: ${c}\nO código é válido por 15 minutos. Se você não solicitou, ignore este e-mail; sua senha não será alterada.` },
+  ru: { vs: "Код подтверждения Pusula", vb: (n, c) => `Здравствуйте, ${n}!\n\nТвой код подтверждения Pusula: ${c}\nКод действует 30 минут. Если ты не запрашивал его, просто проигнорируй это письмо.`, rs: "Код сброса пароля Pusula", rb: (n, c) => `Здравствуйте, ${n}!\n\nТвой код сброса пароля: ${c}\nКод действует 15 минут. Если ты не запрашивал его, проигнорируй это письмо; пароль не изменится.` },
+  ar: { vs: "رمز التحقق من Pusula", vb: (n, c) => `مرحبًا ${n}،\n\nرمز التحقق الخاص بك في Pusula: ${c}\nالرمز صالح لمدة 30 دقيقة. إذا لم تطلب ذلك فتجاهل هذه الرسالة.`, rs: "رمز إعادة تعيين كلمة مرور Pusula", rb: (n, c) => `مرحبًا ${n}،\n\nرمز إعادة تعيين كلمة المرور: ${c}\nالرمز صالح لمدة 15 دقيقة. إذا لم تطلب ذلك فتجاهل هذه الرسالة؛ لن تتغير كلمة مرورك.` },
+  az: { vs: "Pusula doğrulama kodu", vb: (n, c) => `Salam ${n},\n\nPusula doğrulama kodunuz: ${c}\nKod 30 dəqiqə etibarlıdır. Bu sorğunu siz etməmisinizsə, bu e-poçtu nəzərə almayın.`, rs: "Pusula parol sıfırlama kodu", rb: (n, c) => `Salam ${n},\n\nParol sıfırlama kodunuz: ${c}\nKod 15 dəqiqə etibarlıdır. Bu sorğunu siz etməmisinizsə, bu e-poçtu nəzərə almayın; parolunuz dəyişməyəcək.` },
+  id: { vs: "Kode verifikasi Pusula", vb: (n, c) => `Halo ${n},\n\nKode verifikasi Pusula-mu: ${c}\nKode berlaku selama 30 menit. Jika kamu tidak memintanya, abaikan email ini.`, rs: "Kode reset kata sandi Pusula", rb: (n, c) => `Halo ${n},\n\nKode reset kata sandimu: ${c}\nKode berlaku selama 15 menit. Jika kamu tidak memintanya, abaikan email ini; kata sandimu tidak akan berubah.` },
+  ja: { vs: "Pusula 確認コード", vb: (n, c) => `${n} さん、こんにちは。\n\nPusulaの確認コード：${c}\nコードの有効期間は30分です。お心当たりがない場合は、このメールを無視してください。`, rs: "Pusula パスワードリセットコード", rb: (n, c) => `${n} さん、こんにちは。\n\nパスワードリセットコード：${c}\nコードの有効期間は15分です。お心当たりがない場合は、このメールを無視してください。パスワードは変更されません。` }
+};
+const sendVerify = (u, lang) => { const t = MAIL_T[lang] || MAIL_T.en; return sendMail(u.email, t.vs, t.vb(u.name || "", makeCode(u.id, "verify", 30))); };
 
 // ---- hız sınırı (bellek içi) ----
 const hits = new Map();
@@ -265,6 +277,7 @@ app.post("/api/login", wrap(async (req, res) => {
   const tg = totpGate(u, (req.body || {}).code);
   if (tg) { if (tg.error === "bad_totp") noteFail(email); return res.status(tg.s).json({ error: tg.error }); }
   fails.delete(email);
+  loginAlert(u, req);
   res.json({ token: newSession(u.id, req), user: pub(u) });
 }));
 
@@ -289,7 +302,7 @@ app.post("/api/forgot", wrap(async (req, res) => {
   const email = String((req.body || {}).email || "").trim().toLowerCase();
   if (!limit("fg:" + req.ip, 5, 600e3) || !limit("fg:" + email, 3, 600e3)) return res.status(429).json({ error: "rate_limited" });
   const u = okEmail(email) ? db.prepare("SELECT * FROM users WHERE email=?").get(email) : null;
-  if (u) { const en = mailLang(req) === "en"; sendMail(u.email, en ? "Pusula password reset code" : "Pusula parola sıfırlama kodu", en ? `Hello ${u.name || ""},\n\nYour password reset code: ${makeCode(u.id, "reset", 15)}\nThe code is valid for 15 minutes. If you did not request this, ignore this email; your password will not change.` : `Merhaba ${u.name || ""},\n\nParola sıfırlama kodun: ${makeCode(u.id, "reset", 15)}\nKod 15 dakika geçerlidir. Bu isteği sen yapmadıysan bu e-postayı yok say; parolan değişmez.`).catch(e => console.error("posta:", e.message)); }
+  if (u) { const t = MAIL_T[mailLang(req)] || MAIL_T.en; sendMail(u.email, t.rs, t.rb(u.name || "", makeCode(u.id, "reset", 15))).catch(e => console.error("posta:", e.message)); }
   res.json({ ok: true }); // hesap var mı yok mu belli etme
 }));
 
@@ -1485,7 +1498,7 @@ CREATE INDEX IF NOT EXISTS listings_c ON listings(status, category, created DESC
 `);
 const cleanPlace = v => cleanText(v, 40).replace(/\n/g, " ").trim();
 const nrm = t => String(t || "").toLocaleLowerCase("tr").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i");
-const SHOP_CATS = ["Moda", "Elektronik", "Ev ve yaşam", "Yiyecek", "Güzellik", "Eğitim", "Yazılım ve tasarım", "Hizmet", "El işi", "Diğer"], SHOP_CUR = ["TRY", "USD", "EUR", "GBP", "CAD", "AUD", "CHF", "AED", "SAR", "INR", "BRL", "JPY"];
+const SHOP_CATS = ["Moda", "Elektronik", "Ev ve yaşam", "Yiyecek", "Güzellik", "Eğitim", "Yazılım ve tasarım", "Hizmet", "El işi", "Diğer"], SHOP_CUR = ["TRY", "USD", "EUR", "GBP", "CAD", "AUD", "CHF", "AED", "SAR", "INR", "BRL", "JPY", "AZN", "IDR"];
 const LST_SEL = "SELECT l.*, f.handle, f.avatar, f.badge FROM listings l JOIN profiles f ON f.user_id=l.user_id";
 const LST_OK = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=l.user_id) OR (b.blocker=l.user_id AND b.blocked=?)) AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=l.user_id)";
 const lstOut = (r, me) => ({ id: r.id, title: r.title, about: r.about, price: r.price, currency: r.currency, category: r.category, city: r.city, kind: r.kind, image: mediaUrl(r.image), status: r.status, created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), badge: !!r.badge, own: r.user_id === me });
@@ -2500,6 +2513,109 @@ S("mw_set", needProf, (req, res) => {
   res.json({ ok: true, words: db.prepare("SELECT word FROM muted_words WHERE user_id=? ORDER BY created DESC").all(me).map(r => r.word) });
 });
 // ===== END PACK21 =====
+// ===== BEGIN PACK25 =====
+// Paket 25: herkese açık gönderi sayfası /p/<id> (sosyal medya önizlemesi için Open Graph etiketleri).
+const PP_T = { tr: ["Pusula Medya'da", "Uygulamayı aç"], en: ["on Pusula Medya", "Open the app"], de: ["auf Pusula Medya", "App öffnen"], es: ["en Pusula Medya", "Abrir la app"], fr: ["sur Pusula Medya", "Ouvrir l'appli"], pt: ["no Pusula Medya", "Abrir o app"], ru: ["в Pusula Medya", "Открыть приложение"], ar: ["على Pusula Medya", "فتح التطبيق"], az: ["Pusula Medya-da", "Tətbiqi aç"], id: ["di Pusula Medya", "Buka aplikasi"], ja: ["Pusula Medya で", "アプリを開く"] };
+const hEsc = x => String(x == null ? "" : x).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function postPage(req, res, id) {
+  const r = db.prepare(`${POST_SEL} WHERE p.id=? ${NOT_BANNED} AND p.community='' AND NOT EXISTS(SELECT 1 FROM profiles q WHERE q.user_id=p.user_id AND q.private=1)`).get(id);
+  res.setHeader("Content-Type", MIME[".html"]);
+  if (!r) { res.statusCode = 404; res.setHeader("Cache-Control", "no-store"); return res.end('<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Pusula Medya</title><p style="font:16px system-ui;padding:30px">Not found · Bulunamadı · <a href="/">Pusula</a></p>'); }
+  const lang = mailLang(req), t = PP_T[lang] || PP_T.en, host = (req.headers["x-forwarded-proto"] || "http").split(",")[0] + "://" + (req.headers.host || "localhost"), url = host + "/p/" + encodeURIComponent(id);
+  const text = String(r.text || "").trim(), title = `@${r.handle} ${t[0]}`, desc = (text || title).replace(/\s+/g, " ").slice(0, 200);
+  const img = r.kind === "photo" ? mediaUrl(r.media) : r.kind === "reel" ? mediaUrl(r.poster) : "";
+  const imgAbs = img ? (img.startsWith("/") ? host + img : img) : "";
+  const go = r.kind === "reel" ? "/?reel=" + encodeURIComponent(id) : "/";
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.end(`<!doctype html><html lang="${lang}"${lang === "ar" ? ' dir="rtl"' : ""}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${hEsc(title)}</title><meta name="description" content="${hEsc(desc)}"><link rel="canonical" href="${hEsc(url)}"><meta property="og:type" content="article"><meta property="og:site_name" content="Pusula Medya"><meta property="og:title" content="${hEsc(title)}"><meta property="og:description" content="${hEsc(desc)}"><meta property="og:url" content="${hEsc(url)}">${imgAbs ? `<meta property="og:image" content="${hEsc(imgAbs)}"><meta name="twitter:card" content="summary_large_image">` : '<meta name="twitter:card" content="summary">'}<style>body{margin:0;font:16px/1.6 system-ui,sans-serif;background:#070c15;color:#e8f2ff}main{max-width:560px;margin:0 auto;padding:30px 20px}img{max-width:100%;border-radius:12px}a.b{display:inline-block;margin-top:18px;padding:12px 22px;border-radius:12px;background:linear-gradient(90deg,#56c8f5,#5fe0b2);color:#06121c;font-weight:700;text-decoration:none}</style></head><body><main><b style="letter-spacing:.14em">PUSULA MEDYA</b><h2>${hEsc(title)}</h2>${imgAbs ? `<img src="${hEsc(imgAbs)}" alt="">` : ""}<p style="white-space:pre-wrap">${hEsc(text)}</p><a class="b" href="${go}">${hEsc(t[1])} →</a></main><script>if(!/bot|crawl|spider|preview|facebookexternalhit|slack|twitter|whatsapp|telegram|discord/i.test(navigator.userAgent))location.replace("${go}")</script></body></html>`);
+}
+// ===== END PACK25 =====
+// ===== BEGIN PACK26 =====
+// Paket 26: yeni cihazdan girişte güvenlik e-postası (kapatılabilir).
+try { db.exec("ALTER TABLE users ADD COLUMN login_alerts INTEGER NOT NULL DEFAULT 1"); } catch (e) { /* var */ }
+const ALERT_T = {
+  tr: ["Pusula: yeni bir cihazdan giriş yapıldı", (n, d, ip, t) => `Merhaba ${n},\n\nHesabına yeni bir cihazdan giriş yapıldı.\nCihaz: ${d}\nIP: ${ip}\nZaman: ${t} (UTC)\n\nBu sen değilsen hemen parolanı değiştir ve Ayarlar > Aktif oturumlar bölümünden o cihazın oturumunu kapat. Bu bildirimleri Aktif oturumlar bölümünden kapatabilirsin.`],
+  en: ["Pusula: new device sign-in", (n, d, ip, t) => `Hello ${n},\n\nYour account was signed in from a new device.\nDevice: ${d}\nIP: ${ip}\nTime: ${t} (UTC)\n\nIf this wasn't you, change your password right away and sign that device out under Settings > Active sessions. You can turn these alerts off under Active sessions.`],
+  de: ["Pusula: Anmeldung von einem neuen Gerät", (n, d, ip, t) => `Hallo ${n},\n\nDein Konto wurde von einem neuen Gerät angemeldet.\nGerät: ${d}\nIP: ${ip}\nZeit: ${t} (UTC)\n\nWenn du das nicht warst, ändere sofort dein Passwort und melde das Gerät unter Einstellungen > Aktive Sitzungen ab. Diese Hinweise kannst du unter „Aktive Sitzungen“ ausschalten.`],
+  es: ["Pusula: inicio de sesión desde un dispositivo nuevo", (n, d, ip, t) => `Hola ${n},\n\nSe inició sesión en tu cuenta desde un dispositivo nuevo.\nDispositivo: ${d}\nIP: ${ip}\nHora: ${t} (UTC)\n\nSi no fuiste tú, cambia tu contraseña de inmediato y cierra la sesión de ese dispositivo en Ajustes > Sesiones activas. Puedes desactivar estos avisos en Sesiones activas.`],
+  fr: ["Pusula : connexion depuis un nouvel appareil", (n, d, ip, t) => `Bonjour ${n},\n\nUne connexion à ton compte a eu lieu depuis un nouvel appareil.\nAppareil : ${d}\nIP : ${ip}\nHeure : ${t} (UTC)\n\nSi ce n'était pas toi, change immédiatement ton mot de passe et déconnecte cet appareil dans Paramètres > Sessions actives. Tu peux désactiver ces alertes dans Sessions actives.`],
+  pt: ["Pusula: login em um novo dispositivo", (n, d, ip, t) => `Olá ${n},\n\nSua conta foi acessada a partir de um novo dispositivo.\nDispositivo: ${d}\nIP: ${ip}\nHora: ${t} (UTC)\n\nSe não foi você, altere sua senha imediatamente e encerre a sessão desse dispositivo em Configurações > Sessões ativas. Você pode desativar esses alertas em Sessões ativas.`],
+  ru: ["Pusula: вход с нового устройства", (n, d, ip, t) => `Здравствуйте, ${n}!\n\nВ твой аккаунт выполнен вход с нового устройства.\nУстройство: ${d}\nIP: ${ip}\nВремя: ${t} (UTC)\n\nЕсли это был не ты, немедленно смени пароль и завершите сеанс этого устройства в Настройки > Активные сеансы. Эти уведомления можно отключить в разделе «Активные сеансы».`],
+  ar: ["Pusula: تسجيل دخول من جهاز جديد", (n, d, ip, t) => `مرحبًا ${n}،\n\nتم تسجيل الدخول إلى حسابك من جهاز جديد.\nالجهاز: ${d}\nIP: ${ip}\nالوقت: ${t} (UTC)\n\nإذا لم تكن أنت، فغيّر كلمة مرورك فورًا وأنهِ جلسة ذلك الجهاز من الإعدادات > الجلسات النشطة. يمكنك إيقاف هذه التنبيهات من الجلسات النشطة.`],
+  az: ["Pusula: yeni cihazdan giriş", (n, d, ip, t) => `Salam ${n},\n\nHesabınıza yeni bir cihazdan daxil olundu.\nCihaz: ${d}\nIP: ${ip}\nVaxt: ${t} (UTC)\n\nBu siz deyilsinizsə, dərhal parolunuzu dəyişin və Ayarlar > Aktiv sessiyalar bölməsindən həmin cihazdan çıxış edin. Bu bildirişləri Aktiv sessiyalar bölməsindən söndürə bilərsiniz.`],
+  id: ["Pusula: masuk dari perangkat baru", (n, d, ip, t) => `Halo ${n},\n\nAkunmu dimasuki dari perangkat baru.\nPerangkat: ${d}\nIP: ${ip}\nWaktu: ${t} (UTC)\n\nJika ini bukan kamu, segera ubah kata sandimu dan keluarkan perangkat itu di Pengaturan > Sesi aktif. Kamu bisa mematikan peringatan ini di Sesi aktif.`],
+  ja: ["Pusula：新しい端末からのログイン", (n, d, ip, t) => `${n} さん、こんにちは。\n\nお客様のアカウントに新しい端末からログインがありました。\n端末：${d}\nIP：${ip}\n時刻：${t} (UTC)\n\nお心当たりがない場合は、すぐにパスワードを変更し、設定 > アクティブなセッションからその端末をログアウトしてください。この通知はアクティブなセッションからオフにできます。`]
+};
+function loginAlert(u, req) {
+  try {
+    const ua = String(req.headers["user-agent"] || "").slice(0, 120);
+    if (u.login_alerts === 0) return;
+    const had = db.prepare("SELECT COUNT(*) n FROM sessions WHERE user_id=?").get(u.id).n, same = db.prepare("SELECT 1 x FROM sessions WHERE user_id=? AND ua=?").get(u.id, ua);
+    if (!had || same) return;
+    const t = ALERT_T[mailLang(req)] || ALERT_T.en, when = new Date().toISOString().slice(0, 16).replace("T", " ");
+    sendMail(u.email, t[0], t[1](u.name || "", ua || "?", String(req.ip || "?"), when)).catch(e => console.error("posta:", e.message));
+  } catch (e) { console.error("alert:", e.message); }
+}
+app.get("/api/login_alerts", auth, (req, res) => res.json({ on: (db.prepare("SELECT login_alerts FROM users WHERE id=?").get(req.user.id) || {}).login_alerts !== 0 }));
+app.post("/api/login_alerts", auth, (req, res) => { db.prepare("UPDATE users SET login_alerts=? WHERE id=?").run((req.body || {}).on === false ? 0 : 1, req.user.id); res.json({ ok: true, on: (req.body || {}).on !== false }); });
+// ===== END PACK26 =====
+// ===== BEGIN PACK27 =====
+// Paket 27: haftalık özet e-postası (isteğe bağlı): her pazartesi sabah, kullanıcının saat diliminde.
+try { db.exec("ALTER TABLE users ADD COLUMN digest INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE users ADD COLUMN digest_tz INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE users ADD COLUMN digest_lang TEXT NOT NULL DEFAULT 'tr'"); } catch (e) { /* var */ }
+try { db.exec("ALTER TABLE users ADD COLUMN digest_last TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+const DG_T = {
+  tr: ["Pusula haftalık özetin", ["Merhaba", "Geçen hafta", "tamamlanan görev", "gelir", "gider", "net", "Bu hafta", "vadesi gelen görev", "Gecikmiş görev", "Öne çıkanlar", "Bu e-postaları Pusula > Ayarlar > Aktif oturumlar bölümünden kapatabilirsin."]],
+  en: ["Your Pusula weekly summary", ["Hello", "Last week", "tasks completed", "income", "expense", "net", "This week", "tasks due", "Overdue tasks", "Highlights", "You can turn these emails off in Pusula > Settings > Active sessions."]],
+  de: ["Deine Pusula-Wochenübersicht", ["Hallo", "Letzte Woche", "erledigte Aufgaben", "Einnahmen", "Ausgaben", "netto", "Diese Woche", "fällige Aufgaben", "Überfällige Aufgaben", "Highlights", "Diese E-Mails kannst du unter Pusula > Einstellungen > Aktive Sitzungen ausschalten."]],
+  es: ["Tu resumen semanal de Pusula", ["Hola", "La semana pasada", "tareas completadas", "ingresos", "gastos", "neto", "Esta semana", "tareas con vencimiento", "Tareas atrasadas", "Destacados", "Puedes desactivar estos correos en Pusula > Ajustes > Sesiones activas."]],
+  fr: ["Ton résumé hebdomadaire Pusula", ["Bonjour", "La semaine dernière", "tâches terminées", "revenus", "dépenses", "net", "Cette semaine", "tâches à échéance", "Tâches en retard", "À retenir", "Tu peux désactiver ces e-mails dans Pusula > Paramètres > Sessions actives."]],
+  pt: ["Seu resumo semanal do Pusula", ["Olá", "Semana passada", "tarefas concluídas", "receitas", "despesas", "líquido", "Esta semana", "tarefas com vencimento", "Tarefas atrasadas", "Destaques", "Você pode desativar estes e-mails em Pusula > Configurações > Sessões ativas."]],
+  ru: ["Твоя недельная сводка Pusula", ["Здравствуйте", "Прошлая неделя", "выполнено задач", "доходы", "расходы", "итого", "Эта неделя", "задач со сроком", "Просроченные задачи", "Главное", "Эти письма можно отключить в Pusula > Настройки > Активные сеансы."]],
+  ar: ["ملخص Pusula الأسبوعي", ["مرحبًا", "الأسبوع الماضي", "مهام منجزة", "الدخل", "المصروف", "الصافي", "هذا الأسبوع", "مهام مستحقة", "المهام المتأخرة", "أبرز النقاط", "يمكنك إيقاف هذه الرسائل من Pusula > الإعدادات > الجلسات النشطة."]],
+  az: ["Pusula həftəlik xülasəniz", ["Salam", "Keçən həftə", "tamamlanan tapşırıq", "gəlir", "xərc", "xalis", "Bu həftə", "vaxtı çatan tapşırıq", "Gecikmiş tapşırıqlar", "Əsas məqamlar", "Bu e-poçtları Pusula > Ayarlar > Aktiv sessiyalar bölməsindən söndürə bilərsiniz."]],
+  id: ["Ringkasan mingguan Pusula-mu", ["Halo", "Minggu lalu", "tugas selesai", "pemasukan", "pengeluaran", "bersih", "Minggu ini", "tugas jatuh tempo", "Tugas terlambat", "Sorotan", "Kamu bisa mematikan email ini di Pusula > Pengaturan > Sesi aktif."]],
+  ja: ["Pusula 週間サマリー", ["こんにちは", "先週", "件のタスクを完了", "収入", "支出", "純額", "今週", "期限のタスク", "期限切れのタスク", "ハイライト", "このメールは Pusula > 設定 > アクティブなセッションからオフにできます。"]]
+};
+const dgYmd = ms => new Date(ms).toISOString().slice(0, 10);
+function digestFor(u, localMs) {
+  const row = db.prepare("SELECT json FROM data WHERE user_id=?").get(u.id); let d; try { d = row ? JSON.parse(row.json) : null; } catch (e) { d = null; }
+  if (!d) return null;
+  const today = dgYmd(localMs), lw0 = dgYmd(localMs - 7 * 864e5), wk1 = dgYmd(localMs + 6 * 864e5), tasks = Array.isArray(d.tasks) ? d.tasks : [], cash = Array.isArray(d.cash) ? d.cash : [];
+  const open = tasks.filter(t => t && !t.done && /^\d{4}-\d{2}-\d{2}$/.test(t.due || ""));
+  const done = tasks.filter(t => t && t.done && t.doneAt >= lw0 && t.doneAt < today).length;
+  let inn = 0, out = 0; for (const c of cash) if (c && c.date >= lw0 && c.date < today && +c.amt > 0) { if (c.kind === "in") inn += +c.amt; else out += +c.amt; }
+  const overdue = open.filter(t => t.due < today), week = open.filter(t => t.due >= today && t.due <= wk1);
+  return { done, inn: Math.round(inn * 100) / 100, out: Math.round(out * 100) / 100, overdue: overdue.length, week: week.length, top: overdue.concat(week).slice(0, 5).map(t => String(t.text || "").slice(0, 60)) };
+}
+function digestMail(u, g) {
+  const t = DG_T[u.digest_lang] || DG_T.en, w = t[1], net = Math.round((g.inn - g.out) * 100) / 100;
+  let b = `${w[0]} ${u.name || ""},\n\n${w[1]}: ${g.done} ${w[2]}; ${w[3]} ${g.inn}, ${w[4]} ${g.out}, ${w[5]} ${net}.\n${w[6]}: ${g.week} ${w[7]}.`;
+  if (g.overdue) b += `\n${w[8]}: ${g.overdue}`;
+  if (g.top.length) b += `\n\n${w[9]}:\n` + g.top.map(x => "• " + x).join("\n");
+  return [t[0], b + `\n\n${w[10]}`];
+}
+async function digestRun(nowMs) {
+  let sent = 0; nowMs = nowMs || Date.now();
+  for (const u of db.prepare("SELECT * FROM users WHERE digest=1").all()) {
+    const lm = nowMs - u.digest_tz * 60000, ld = new Date(lm); // digest_tz = Date.getTimezoneOffset() (UTC - yerel)
+    if (ld.getUTCDay() !== 1 || ld.getUTCHours() < 8 || dgYmd(lm) === u.digest_last) continue;
+    db.prepare("UPDATE users SET digest_last=? WHERE id=?").run(dgYmd(lm), u.id);
+    const g = digestFor(u, lm); if (!g) continue;
+    const [sub, body] = digestMail(u, g);
+    try { await sendMail(u.email, sub, body); sent++; } catch (e) { console.error("özet:", e.message); }
+  }
+  return sent;
+}
+setInterval(() => digestRun().catch(e => console.error("özet:", e.message)), 30 * 60e3).unref();
+app.get("/api/digest", auth, (req, res) => { const u = db.prepare("SELECT digest FROM users WHERE id=?").get(req.user.id); res.json({ on: !!(u && u.digest) }); });
+app.post("/api/digest", auth, (req, res) => {
+  const b = req.body || {}, on = b.on === true ? 1 : 0, tz = Math.max(-840, Math.min(840, Math.round(+b.tz) || 0)), lg = MAIL_LANGS.includes(b.lang) ? b.lang : mailLang(req);
+  db.prepare("UPDATE users SET digest=?, digest_tz=?, digest_lang=? WHERE id=?").run(on, tz, lg, req.user.id);
+  res.json({ ok: true, on: !!on });
+});
+// ===== END PACK27 =====
 // ===== BEGIN MEDIA PROXY =====
 // Görsel/video/ses: telefon operatörü r2.dev ya da R2 yükleme adresine ulaşamasa da uygulama yalnızca bu sunucuyla konuşur.
 const ISSUED = new Map(); // upload ile verilmiş anahtarlar: key -> { uid, type, size, exp }
@@ -2718,12 +2834,13 @@ function legalFill(html, mtime) {
 }
 function serveStatic(req, res, pathname) {
   if (req.method !== "GET" && req.method !== "HEAD") return res.json({ error: "not_found" }, 404);
+  { const pm = /^\/p\/([\w-]{3,40})\/?$/.exec(pathname); if (pm) return postPage(req, res, pm[1]); }
   if (INDEX === null) INDEX = loadIndex() || "";
   if (!INDEX) { res.statusCode = 200; res.setHeader("Content-Type", "text/plain; charset=utf-8"); return res.end("Pusula sunucusu çalışıyor. Uygulama dosyaları için public/index.html ekleyin."); }
   let p;
   try { p = decodeURIComponent(pathname); } catch (e) { return res.json({ error: "bad_request" }, 400); }
   if (p === "/" || p === "/index.html") { res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(req.method === "HEAD" ? undefined : INDEX); }
-  const lm = /^\/(en|de|es|fr|pt|ru|ar)\/?$/.exec(p); // dile özel tanıtım sayfaları (arama motorları için)
+  const lm = /^\/(en|de|es|fr|pt|ru|ar|az|id|ja)\/?$/.exec(p); // dile özel tanıtım sayfaları (arama motorları için)
   if (lm) { const lf = path.join(PUB, lm[1], "index.html"); if (fs.existsSync(lf)) { res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "public, max-age=3600"); return res.end(req.method === "HEAD" ? undefined : fs.readFileSync(lf)); } }
   const f = path.normalize(path.join(PUB, p));
   if (!f.startsWith(PUB + path.sep) || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
@@ -2772,4 +2889,4 @@ if (require.main === module) {
   server.listen(PORT, () => console.log(`Pusula sunucusu :${PORT} · e-posta: ${HAS_MAIL ? "açık" : "kapalı (kodlar günlüğe yazılır)"} · doğrulama: ${REQUIRE_VERIFY ? "açık" : "kapalı"}`));
 }
 server.requestTimeout = 20 * 60e3; // büyük video yüklemeleri için
-module.exports = { server, db, sigV4Presign };
+module.exports = { server, db, sigV4Presign, digestRun };
