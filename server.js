@@ -949,11 +949,13 @@ S("notifs", needProf, (req, res) => {
 S("notifs_read", needProf, (req, res) => { db.prepare("UPDATE notifs SET read=1 WHERE user_id=? AND read=0").run(req.user.id); res.json({ ok: true }); });
 
 // --- Etiket, tek gönderi, keşfet
+db.exec("CREATE TABLE IF NOT EXISTS tag_follows(user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tag TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(user_id, tag))");
+const TAG_VIS = "(p.user_id=? OR NOT EXISTS(SELECT 1 FROM profiles z WHERE z.user_id=p.user_id AND z.private=1) OR EXISTS(SELECT 1 FROM follows w WHERE w.follower=? AND w.followee=p.user_id))";
 S("tag", needProf, (req, res) => {
   const me = req.user.id, tag = String((req.body || {}).tag || "").replace(/^#/, "").toLocaleLowerCase("tr"), before = +(req.body || {}).before || now() + 1;
   if (!/^[\p{L}\p{N}_]{2,30}$/u.test(tag)) return res.status(400).json({ error: "bad_tag" });
-  const rows = db.prepare(`${POST_SEL} JOIN tags t ON t.post_id=p.id WHERE t.tag=? AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY p.created DESC LIMIT 20`).all(tag, before, me, me);
-  res.json({ tag, posts: postRows(rows, me) });
+  const rows = db.prepare(`${POST_SEL} JOIN tags t ON t.post_id=p.id WHERE t.tag=? AND p.community='' AND p.created<? ${NOT_BLOCKED} ${NOT_BANNED} AND ${TAG_VIS} ORDER BY p.created DESC LIMIT 20`).all(tag, before, me, me, me, me);
+  res.json({ tag, posts: postRows(rows, me), following: !!db.prepare("SELECT 1 FROM tag_follows WHERE user_id=? AND tag=?").get(me, tag) });
 });
 S("getpost", needProf, (req, res) => {
   const me = req.user.id, rows = db.prepare(`${POST_SEL} WHERE p.id=? ${NOT_BLOCKED} ${NOT_BANNED}`).all(String((req.body || {}).id || ""), me, me);
@@ -2230,6 +2232,54 @@ S("follower_remove", needProf, (req, res) => {
   res.json({ ok: true });
 });
 // ===== END PACK10 =====
+// ===== BEGIN PACK11 =====
+S("liked_list", needProf, (req, res) => {
+  const me = req.user.id, off = Math.max(0, Math.floor(+(req.body || {}).off || 0));
+  const rows = db.prepare(`${POST_SEL} JOIN likes lk ON lk.post_id=p.id AND lk.user_id=? WHERE 1=1 ${NOT_BLOCKED} ${NOT_BANNED} ORDER BY lk.created DESC, lk.rowid DESC LIMIT 30 OFFSET ${Math.min(off, 5000)}`).all(me, me, me);
+  res.json({ posts: postRows(rows, me) });
+});
+S("data_export", needProf, (req, res) => {
+  const me = req.user.id;
+  if (!limit("dexp:" + me, 5, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const pr = db.prepare("SELECT handle,bio,avatar,created FROM profiles WHERE user_id=?").get(me) || {};
+  const posts = db.prepare("SELECT id,kind,text,media,created FROM posts WHERE user_id=? ORDER BY created DESC LIMIT 5000").all(me);
+  const comments = db.prepare("SELECT post_id,text,created FROM comments WHERE user_id=? ORDER BY created DESC LIMIT 5000").all(me);
+  const followers = db.prepare("SELECT p.handle FROM follows f JOIN profiles p ON p.user_id=f.follower WHERE f.followee=?").all(me).map(x => x.handle);
+  const following = db.prepare("SELECT p.handle FROM follows f JOIN profiles p ON p.user_id=f.followee WHERE f.follower=?").all(me).map(x => x.handle);
+  const likes = db.prepare("SELECT COUNT(*) n FROM likes WHERE user_id=?").get(me).n;
+  const saves = db.prepare("SELECT COUNT(*) n FROM saves WHERE user_id=?").get(me).n;
+  res.json({ exported: now(), profile: pr, posts, comments, followers, following, likes, saves });
+});
+// ===== END PACK11 =====
+// ===== BEGIN PACK12 =====
+S("post_likers", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, off = Math.min(5000, Math.max(0, Math.floor(+b.off || 0)));
+  const p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(String(b.id || ""));
+  if (!p || p.user_id !== me) return res.status(404).json({ error: "not_found" });
+  const rows = db.prepare(`SELECT pr.handle, pr.avatar FROM likes l JOIN profiles pr ON pr.user_id=l.user_id WHERE l.post_id=? AND l.user_id<>? AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=l.user_id) AND NOT EXISTS(SELECT 1 FROM blocks k WHERE (k.blocker=? AND k.blocked=l.user_id) OR (k.blocker=l.user_id AND k.blocked=?)) ORDER BY l.created DESC, l.rowid DESC LIMIT 50 OFFSET ${off}`).all(String(b.id), me, me, me);
+  res.json({ users: rows.map(r => ({ handle: r.handle, avatar: mediaUrl(r.avatar) })), total: db.prepare("SELECT COUNT(*) n FROM likes WHERE post_id=?").get(String(b.id)).n });
+});
+// ===== END PACK12 =====
+// ===== BEGIN PACK15 =====
+const TAGRE = /^[\p{L}\p{N}_]{2,30}$/u;
+S("tag_follow", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tag = String(b.tag || "").replace(/^#/, "").toLocaleLowerCase("tr");
+  if (!TAGRE.test(tag)) return res.status(400).json({ error: "bad_tag" });
+  if (b.on) {
+    if (db.prepare("SELECT COUNT(*) n FROM tag_follows WHERE user_id=?").get(me).n >= 30 && !db.prepare("SELECT 1 FROM tag_follows WHERE user_id=? AND tag=?").get(me, tag)) return res.status(400).json({ error: "too_many" });
+    db.prepare("INSERT OR IGNORE INTO tag_follows(user_id,tag,created) VALUES(?,?,?)").run(me, tag, now());
+  } else db.prepare("DELETE FROM tag_follows WHERE user_id=? AND tag=?").run(me, tag);
+  res.json({ tag, following: !!b.on });
+});
+S("tag_follows", needProf, (req, res) => {
+  res.json({ tags: db.prepare("SELECT tag FROM tag_follows WHERE user_id=? ORDER BY created DESC").all(req.user.id).map(r => r.tag) });
+});
+S("tag_feed", needProf, (req, res) => {
+  const me = req.user.id, before = +(req.body || {}).before || now() + 1;
+  const rows = db.prepare(`${POST_SEL} WHERE p.community='' AND p.created<? AND EXISTS(SELECT 1 FROM tags t JOIN tag_follows tf ON tf.tag=t.tag AND tf.user_id=? WHERE t.post_id=p.id) ${NOT_BLOCKED} ${NOT_BANNED} AND ${TAG_VIS} ORDER BY p.created DESC LIMIT 20`).all(before, me, me, me, me, me);
+  res.json({ posts: postRows(rows, me) });
+});
+// ===== END PACK15 =====
 // ===== BEGIN MEDIA PROXY =====
 // Görsel/video/ses: telefon operatörü r2.dev ya da R2 yükleme adresine ulaşamasa da uygulama yalnızca bu sunucuyla konuşur.
 const ISSUED = new Map(); // upload ile verilmiş anahtarlar: key -> { uid, type, size, exp }
@@ -2431,6 +2481,19 @@ function loadIndex() {
   if (!fs.existsSync(f)) return null;
   return fs.readFileSync(f, "utf8").replace("<head>", '<head><script>window.PUSULA_CONFIG=Object.assign(window.PUSULA_CONFIG||{},{serverUrl:"auto"});</script>');
 }
+// Yasal sayfalardaki yer tutucuları Render ortam değişkenlerinden doldurur (CONTACT_EMAIL, OWNER_NAME, LEGAL_DATE).
+const LEGAL_PAGES = new Set(["gizlilik.html", "kurallar.html", "hesap-sil.html"]);
+const escHtml = x => String(x).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function legalFill(html, mtime) {
+  const mail = String(process.env.CONTACT_EMAIL || "").trim().slice(0, 120), owner = String(process.env.OWNER_NAME || "").trim().slice(0, 120);
+  const date = String(process.env.LEGAL_DATE || "").trim().slice(0, 40) || new Date(mtime).toLocaleDateString("tr-TR", { day: "numeric", month: "long", year: "numeric", timeZone: "Europe/Istanbul" });
+  const put = (h, ph, v) => v ? h.split('<span class="todo">' + ph + '</span>').join(escHtml(v)) : h;
+  html = put(html, "[E-POSTA ADRESİN]", /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/.test(mail) ? mail : "");
+  html = put(html, "[ADIN / ŞİRKET ADIN]", owner);
+  const days = String(process.env.BACKUP_DAYS || "").trim();
+  html = put(html, "[30]", /^\d{1,3}$/.test(days) && +days >= 1 && +days <= 365 ? days : "");
+  return put(html, "[TARİH]", date);
+}
 function serveStatic(req, res, pathname) {
   if (req.method !== "GET" && req.method !== "HEAD") return res.json({ error: "not_found" }, 404);
   if (INDEX === null) INDEX = loadIndex() || "";
@@ -2441,6 +2504,10 @@ function serveStatic(req, res, pathname) {
   const f = path.normalize(path.join(PUB, p));
   if (!f.startsWith(PUB + path.sep) || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
     res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(INDEX); // SPA
+  }
+  if (LEGAL_PAGES.has(path.basename(f))) {
+    res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache");
+    return res.end(req.method === "HEAD" ? undefined : legalFill(fs.readFileSync(f, "utf8"), fs.statSync(f).mtime));
   }
   res.setHeader("Content-Type", MIME[path.extname(f)] || "application/octet-stream");
   res.setHeader("Cache-Control", f.endsWith("sw.js") ? "no-cache" : "public, max-age=3600");

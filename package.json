@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test.js && node test_billing.js && node test_ai.js && node test_backup.js && node test_mail.js && node test_social.js && node test_google.js && node test_social2.js && node test_e2e.js && node test_social3.js && node test_receipt.js && node test_reels.js && node test_comm.js && node test_studio.js && node test_shop.js && node test_album.js && node test_insta.js && node test_pack2.js && node test_music.js && node test_catalog.js && node test_live.js && node test_pack3.js && node test_pack4.js && node test_pack5.js && node test_pack6.js && node test_pack7.js && node test_pack8.js && node test_pack9.js && node test_pack10.js"
+    "test": "node test.js && node test_billing.js && node test_ai.js && node test_backup.js && node test_mail.js && node test_social.js && node test_google.js && node test_social2.js && node test_e2e.js && node test_social3.js && node test_receipt.js && node test_reels.js && node test_comm.js && node test_studio.js && node test_shop.js && node test_album.js && node test_insta.js && node test_pack2.js && node test_music.js && node test_catalog.js && node test_live.js && node test_pack3.js && node test_pack4.js && node test_pack5.js && node test_pack6.js && node test_pack7.js && node test_pack8.js && node test_pack9.js && node test_pack10.js && node test_pack11.js && node test_pack12.js && node test_pack15.js && node test_legal.js"
   },
   "engines": {
     "node": ">=22.13"
