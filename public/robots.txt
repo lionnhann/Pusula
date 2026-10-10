@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /admin.html
 Disallow: /api/
-Sitemap: https://pusula-3ejq.onrender.com/sitemap.txt
+Sitemap: https://pusula-3ejq.onrender.com/sitemap.xml
