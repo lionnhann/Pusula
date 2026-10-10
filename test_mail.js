@@ -23,6 +23,21 @@ up.listen(0, () => {
       r = await call("/api/reset", { email: "u@ornek.com", code, password: "yeni-parola-1" }); ok(r.s === 200, "reset with code");
       r = await call("/api/login", { email: "u@ornek.com", password: "yeni-parola-1" }); ok(r.token, "login with new password");
       r = await call("/api/forgot", { email: "yok@ornek.com" }); ok(r.s === 200, "unknown email gives same answer");
+      // 2FA açıkken parola sıfırlama TOTP olmadan tamamlanamaz (e-posta kodu yanmaz)
+      {
+        const crypto = require("crypto"), B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        const dec = s => { let bits = 0, v = 0; const o = []; for (const c of s) { v = (v << 5) | B32.indexOf(c); bits += 5; if (bits >= 8) { o.push((v >>> (bits - 8)) & 255); bits -= 8; } } return Buffer.from(o); };
+        const tc = (sec, ms) => { const c = Buffer.alloc(8); c.writeBigUInt64BE(BigInt(Math.floor(ms / 30000))); const h = crypto.createHmac("sha1", dec(sec)).update(c).digest(), o = h[19] & 15; return String((((h[o] & 127) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3]) % 1e6).padStart(6, "0"); };
+        const authed = async (p, b, tok) => { const x = await fetch(base + p, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + tok }, body: JSON.stringify(b) }); const j = await x.json().catch(() => ({})); j.s = x.status; return j; };
+        r = await call("/api/login", { email: "u@ornek.com", password: "yeni-parola-1" }); const tk = r.token;
+        r = await authed("/api/2fa/setup", {}, tk); const S = r.secret; r = await authed("/api/2fa/enable", { code: tc(S, Date.now()) }, tk); ok(r.ok, "2fa on");
+        mails.length = 0; await call("/api/forgot", { email: "u@ornek.com" }); await new Promise(z => setTimeout(z, 300));
+        const c2 = (mails[0].body.textContent.match(/kodun: (\d{6})/) || [])[1];
+        r = await call("/api/reset", { email: "u@ornek.com", code: c2, password: "baska-parola-9" }); ok(r.s === 401 && r.error === "totp_required", "reset needs 2fa code");
+        r = await call("/api/reset", { email: "u@ornek.com", code: c2, password: "baska-parola-9", totp: "000000" }); ok(r.s === 401 && r.error === "bad_totp", "reset rejects wrong 2fa");
+        r = await call("/api/reset", { email: "u@ornek.com", code: "000000", password: "baska-parola-9", totp: tc(S, Date.now() + 30000) }); ok(r.s === 400, "wrong email code still rejected");
+        r = await call("/api/reset", { email: "u@ornek.com", code: c2, password: "baska-parola-9", totp: tc(S, Date.now() + 30000) }); ok(r.s === 200 && r.token, "reset succeeds with email code + 2fa");
+      }
       console.log("e-posta testleri geçti:", n); up.close(); server.close(); process.exit(0);
     } catch (e) { console.error("FAIL", e.message); process.exit(1); }
   });
