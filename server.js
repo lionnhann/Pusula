@@ -15,7 +15,14 @@ const SESSION_DAYS = +process.env.SESSION_DAYS || 60;
 const MAX_DATA = +process.env.MAX_DATA_BYTES || 2 * 1024 * 1024;
 // Abonelik (Lemon Squeezy). İkisi de boşsa ödeme kapalıdır ve herkes Pro gibi davranır.
 const LS_URL = process.env.LS_CHECKOUT_URL || "", LS_SECRET = process.env.LS_WEBHOOK_SECRET || "";
-const BILLING = !!(LS_URL && LS_SECRET);
+const LS_ON = !!(LS_URL && LS_SECRET);
+// Google Play aboneliği (uygulama içi Pro). Hizmet hesabı JSON'u (ya da base64'ü) verilirse açılır.
+const PLAY_PKG = String(process.env.PLAY_PACKAGE || "com.emirhan.pusula"), PLAY_SKU = String(process.env.PLAY_PRODUCT_ID || "pusula_pro");
+const PLAY_API = String(process.env.PLAY_API_BASE || "https://androidpublisher.googleapis.com/androidpublisher/v3").replace(/\/+$/, ""), PLAY_TOKEN_URL = String(process.env.PLAY_TOKEN_URL || "https://oauth2.googleapis.com/token");
+const PLAY_RTDN_KEY = String(process.env.PLAY_RTDN_KEY || "");
+const PLAY_SA = (() => { try { let x = String(process.env.PLAY_SERVICE_ACCOUNT || "").trim(); if (!x) return null; if (x[0] !== "{") x = Buffer.from(x, "base64").toString("utf8"); const j = JSON.parse(x); return j.client_email && j.private_key ? { email: String(j.client_email), key: String(j.private_key).replace(/\\n/g, "\n") } : null; } catch (e) { return null; } })();
+const PLAY_ON = !!PLAY_SA;
+const BILLING = LS_ON || PLAY_ON;
 const TRIAL_DAYS = process.env.TRIAL_DAYS !== undefined && process.env.TRIAL_DAYS !== "" ? +process.env.TRIAL_DAYS : 14;
 const FREE_MAX_DATA = +process.env.FREE_MAX_DATA_BYTES || 100 * 1024;
 const PRICE_LABEL = String(process.env.PRO_PRICE_LABEL || "").slice(0, 40);
@@ -235,15 +242,18 @@ if (BILLING && !db.prepare("SELECT 1 FROM meta WHERE k='billing_since'").get()) 
 const billingSince = () => { const r = db.prepare("SELECT v FROM meta WHERE k='billing_since'").get(); return r ? +r.v || 0 : 0; };
 function planOf(u) {
   const p = db.prepare("SELECT * FROM plans WHERE user_id=?").get(u.id) || {}, t = now();
-  const base = { billing: BILLING, price: PRICE_LABEL, limit: FREE_MAX_DATA, manage: !!p.portal };
-  const live = (["active", "on_trial", "past_due"].includes(p.status) && (p.provider !== "manual" || p.ends > t)) || (p.status === "cancelled" && p.ends > t);
+  const base = { billing: BILLING, price: PRICE_LABEL, limit: FREE_MAX_DATA, manage: !!p.portal || (p.provider === "play" && ["active", "cancelled", "past_due"].includes(p.status)), src: p.provider || "", web: LS_ON, play: PLAY_ON ? { sku: PLAY_SKU, pkg: PLAY_PKG, acct: playAcct(u) } : null };
+  const live = (["active", "on_trial", "past_due"].includes(p.status) && ((p.provider !== "manual" && p.provider !== "play") || p.ends > t)) || (p.status === "cancelled" && p.ends > t);
   if (live) return { ...base, state: "pro", cancelling: p.status === "cancelled", until: p.status === "cancelled" ? p.ends : (p.renews || p.ends || 0) };
   if (!BILLING) return { ...base, state: "pro", until: 0 };
   const trialEnd = Math.max(u.created, billingSince()) + TRIAL_DAYS * 864e5;
   if (trialEnd > t) return { ...base, state: "trial", until: trialEnd };
   return { ...base, state: "free", until: 0 };
 }
-const pub = u => ({ id: u.id, email: u.email, name: u.name, verified: !!u.verified, plan: planOf(u) });
+const playAcct = u => sha("play:" + u.id).slice(0, 32);
+const aiMaxFor = ps => !BILLING ? AI_DAILY : ps === "pro" ? AI_DAILY_PRO : ps === "free" ? Math.min(AI_DAILY, 15) : AI_DAILY;
+const aiUsedToday = uid => (db.prepare("SELECT n FROM ai_usage WHERE user_id=? AND day=?").get(uid, new Date().toISOString().slice(0, 10)) || {}).n || 0;
+const pub = u => { const pl = planOf(u); return { id: u.id, email: u.email, name: u.name, verified: !!u.verified, plan: { ...pl, ai: { used: aiUsedToday(u.id), max: aiMaxFor(pl.state), free: Math.min(AI_DAILY, 15), pro: AI_DAILY_PRO } } }; };
 function auth(req, res, next) {
   const h = String(req.headers.authorization || ""), t = h.startsWith("Bearer ") ? h.slice(7) : "";
   if (!t) return res.status(401).json({ error: "unauthorized" });
@@ -352,14 +362,14 @@ app.post("/api/delete", auth, wrap(async (req, res) => {
   if (!limit("del:" + req.user.id, 5, 600e3)) return res.status(429).json({ error: "rate_limited" });
   if (!safeEq(await scrypt(String((req.body || {}).password || "").slice(0, 100), req.user.pw_salt), req.user.pw_hash)) return res.status(401).json({ error: "bad_credentials" });
   const pl = db.prepare("SELECT status, provider FROM plans WHERE user_id=?").get(req.user.id);
-  if (pl && pl.provider === "ls" && ["active", "on_trial", "past_due"].includes(pl.status)) return res.status(409).json({ error: "cancel_subscription_first" });
+  if (pl && (pl.provider === "ls" || pl.provider === "play") && ["active", "on_trial", "past_due"].includes(pl.status)) return res.status(409).json({ error: "cancel_subscription_first" });
   try { purgeUserMedia(req.user.id); } catch (e) { /* depolama temizliği en iyi çaba */ }
   db.prepare("DELETE FROM users WHERE id=?").run(req.user.id); // sessions, codes, data zincirleme silinir
   res.json({ ok: true });
 }));
 
 app.post("/api/billing/checkout", auth, (req, res) => {
-  if (!BILLING) return res.status(400).json({ error: "billing_off" });
+  if (!LS_ON) return res.status(400).json({ error: "billing_off" });
   if (REQUIRE_VERIFY && !req.user.verified) return res.status(403).json({ error: "verify_required" });
   if (planOf(req.user).state === "pro") return res.status(409).json({ error: "already_pro" });
   const u = new URL(LS_URL);
@@ -374,7 +384,7 @@ app.post("/api/billing/portal", auth, (req, res) => {
   res.json({ url: p.portal });
 });
 app.post("/api/billing/webhook", (req, res) => {
-  if (!BILLING) return res.status(404).json({ error: "not_found" });
+  if (!LS_ON) return res.status(404).json({ error: "not_found" });
   const sig = String(req.headers["x-signature"] || ""), mac = crypto.createHmac("sha256", LS_SECRET).update(req.raw || Buffer.alloc(0)).digest("hex");
   if (!sig || !safeEq(sig, mac)) return res.status(401).json({ error: "bad_signature" });
   const ev = req.body || {}, meta = ev.meta || {}, d = ev.data || {}, a = d.attributes || {};
@@ -413,7 +423,7 @@ app.post("/api/ai", auth, async (req, res) => {
   const turns = msgs.filter(t => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string" && t.content).map(t => ({ role: t.role, content: t.content }));
   if (!turns.length || turns[turns.length - 1].role !== "user") return res.status(400).json({ error: "bad_request" });
   if (turns.reduce((n, t) => n + t.content.length, 0) > AI_MAX_IN) return res.status(413).json({ error: "too_large" });
-  const day = new Date().toISOString().slice(0, 10), ps = planOf(req.user).state, max = !BILLING ? AI_DAILY : ps === "pro" ? AI_DAILY_PRO : ps === "free" ? Math.min(AI_DAILY, 15) : AI_DAILY;
+  const day = new Date().toISOString().slice(0, 10), ps = planOf(req.user).state, max = aiMaxFor(ps);
   const used = (db.prepare("SELECT n FROM ai_usage WHERE user_id=? AND day=?").get(req.user.id, day) || {}).n || 0;
   if (used >= max) return res.status(429).json({ error: "ai_quota", limit: max });
   db.prepare("INSERT INTO ai_usage(user_id,day,n) VALUES(?,?,1) ON CONFLICT(user_id,day) DO UPDATE SET n=n+1").run(req.user.id, day);
@@ -460,7 +470,7 @@ app.post("/api/receipt", auth, async (req, res) => {
   const im = (req.body || {}).image || {}, mime = String(im.mime || ""), data = String(im.data || "");
   if (!/^image\/(jpeg|png|webp)$/.test(mime) || !/^[A-Za-z0-9+/=]+$/.test(data) || data.length < 100) return res.status(400).json({ error: "bad_image" });
   if (data.length > 1500000) return res.status(413).json({ error: "too_large" });
-  const day = new Date().toISOString().slice(0, 10), ps = planOf(req.user).state, max = !BILLING ? AI_DAILY : ps === "pro" ? AI_DAILY_PRO : ps === "free" ? Math.min(AI_DAILY, 15) : AI_DAILY;
+  const day = new Date().toISOString().slice(0, 10), ps = planOf(req.user).state, max = aiMaxFor(ps);
   const used = (db.prepare("SELECT n FROM ai_usage WHERE user_id=? AND day=?").get(req.user.id, day) || {}).n || 0;
   if (used >= max) return res.status(429).json({ error: "ai_quota", limit: max });
   db.prepare("INSERT INTO ai_usage(user_id,day,n) VALUES(?,?,1) ON CONFLICT(user_id,day) DO UPDATE SET n=n+1").run(req.user.id, day);
@@ -2827,6 +2837,102 @@ S("chat_pref", needProf, (req, res) => {
 });
 // ===== END PACK45 =====
 
+// ===== PACK 47: Pusula Pro — Google Play aboneliği =====
+// İstemci (Play Faturalandırma) satın alma jetonunu gönderir; sunucu Google'dan doğrular, onaylar (acknowledge) ve planı yazar.
+let playTok = { t: "", exp: 0 };
+async function playAccess() {
+  if (playTok.t && playTok.exp > Date.now() + 60e3) return playTok.t;
+  const b64 = o => Buffer.from(JSON.stringify(o)).toString("base64url"), iat = Math.floor(Date.now() / 1000);
+  const head = b64({ alg: "RS256", typ: "JWT" }), body = b64({ iss: PLAY_SA.email, scope: "https://www.googleapis.com/auth/androidpublisher", aud: PLAY_TOKEN_URL, iat, exp: iat + 3000 });
+  const sig = crypto.createSign("RSA-SHA256").update(head + "." + body).sign(PLAY_SA.key).toString("base64url");
+  const r = await fetch(PLAY_TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: head + "." + body + "." + sig }), signal: AbortSignal.timeout(15000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) throw new Error("play_auth");
+  playTok = { t: String(j.access_token), exp: Date.now() + (+j.expires_in || 3000) * 1000 };
+  return playTok.t;
+}
+async function playGet(token) {
+  const a = await playAccess();
+  const r = await fetch(PLAY_API + "/applications/" + encodeURIComponent(PLAY_PKG) + "/purchases/subscriptionsv2/tokens/" + encodeURIComponent(token), { headers: { authorization: "Bearer " + a }, signal: AbortSignal.timeout(15000) });
+  if ([400, 404, 410].includes(r.status)) return { invalid: true };
+  if (r.status === 401) playTok = { t: "", exp: 0 };
+  if (!r.ok) throw new Error("play_api_" + r.status);
+  return await r.json();
+}
+async function playAck(sku, token) {
+  const a = await playAccess();
+  const r = await fetch(PLAY_API + "/applications/" + encodeURIComponent(PLAY_PKG) + "/purchases/subscriptions/" + encodeURIComponent(sku) + "/tokens/" + encodeURIComponent(token) + ":acknowledge", { method: "POST", headers: { authorization: "Bearer " + a, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(15000) });
+  return r.ok;
+}
+function playMap(j) {
+  const li = (j.lineItems || []).find(x => x && x.productId === PLAY_SKU) || (j.lineItems || [])[0] || {};
+  const exp = Date.parse(li.expiryTime) || 0, st = String(j.subscriptionState || "");
+  const m = { productId: String(li.productId || ""), acct: String(((j.externalAccountIdentifiers || {}).obfuscatedExternalAccountId) || ""), ack: j.acknowledgementState === "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED" };
+  if (st === "SUBSCRIPTION_STATE_ACTIVE") return { ...m, status: "active", ends: exp };
+  if (st === "SUBSCRIPTION_STATE_CANCELED") return { ...m, status: "cancelled", ends: exp }; // otomatik yenileme kapalı; süre bitene dek Pro
+  if (st === "SUBSCRIPTION_STATE_IN_GRACE_PERIOD") return { ...m, status: "active", ends: Math.max(exp, now()) + 3 * 864e5 }; // ödeme sorunu: kısa süre erişim sürer
+  if (st === "SUBSCRIPTION_STATE_PENDING") return { ...m, pending: true };
+  return { ...m, status: "expired", ends: exp };
+}
+function playApply(uid, token, m) {
+  db.prepare("INSERT INTO plans(user_id,status,provider,ext_id,renews,ends,portal,stamp) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET status=excluded.status, provider=excluded.provider, ext_id=excluded.ext_id, renews=excluded.renews, ends=excluded.ends, portal='', stamp=excluded.stamp")
+    .run(uid, m.status, "play", token, m.status === "active" ? m.ends : 0, m.ends, "", now());
+}
+// Süresi yaklaşan/yenilenen abonelikleri Google'dan tazele (yenileme, iptal, süre bitişi). RTDN kurulu değilse de çalışır.
+let playSyncBusy = false;
+async function playSyncAll() {
+  if (!PLAY_ON || playSyncBusy) return 0;
+  playSyncBusy = true; let n = 0;
+  try {
+    const rows = db.prepare("SELECT user_id, ext_id FROM plans WHERE provider='play' AND ext_id<>'' AND status IN ('active','cancelled','past_due') AND ends < ? LIMIT 200").all(now() + 2 * 864e5);
+    for (const r of rows) {
+      try {
+        const j = await playGet(r.ext_id); if (j.invalid) { playApply(r.user_id, r.ext_id, { status: "expired", ends: 0 }); n++; continue; }
+        const m = playMap(j); if (m.pending) continue;
+        playApply(r.user_id, r.ext_id, m); n++;
+        if (!m.ack && m.status !== "expired") playAck(m.productId || PLAY_SKU, r.ext_id).catch(() => {});
+      } catch (e) { /* geçici hata: sonraki turda yeniden denenir */ }
+    }
+  } finally { playSyncBusy = false; }
+  return n;
+}
+if (PLAY_ON) { setTimeout(() => playSyncAll().catch(() => {}), 45e3).unref(); setInterval(() => playSyncAll().catch(() => {}), 6 * 3600e3).unref(); }
+app.post("/api/billing/play", auth, async (req, res) => {
+  if (!PLAY_ON) return res.status(400).json({ error: "billing_off" });
+  if (!limit("play:" + req.user.id, 20, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (REQUIRE_VERIFY && !req.user.verified) return res.status(403).json({ error: "verify_required" });
+  const token = String((req.body || {}).token || "").trim();
+  if (!/^[A-Za-z0-9._-]{20,600}$/.test(token)) return res.status(400).json({ error: "bad_request" });
+  const other = db.prepare("SELECT user_id FROM plans WHERE provider='play' AND ext_id=?").get(token);
+  if (other && other.user_id !== req.user.id) return res.status(409).json({ error: "token_used" });
+  const cur = db.prepare("SELECT provider FROM plans WHERE user_id=?").get(req.user.id);
+  if (cur && cur.provider === "ls" && planOf(req.user).state === "pro") return res.status(409).json({ error: "already_pro" });
+  let j; try { j = await playGet(token); } catch (e) { return res.status(502).json({ error: "play_unavailable" }); }
+  if (j.invalid) return res.status(400).json({ error: "invalid_purchase" });
+  const m = playMap(j);
+  if (m.productId !== PLAY_SKU) return res.status(400).json({ error: "wrong_product" });
+  if (m.acct && m.acct !== playAcct(req.user)) return res.status(409).json({ error: "wrong_account" });
+  if (m.pending) return res.json({ ok: true, pending: true, user: pub(req.user) });
+  playApply(req.user.id, token, m);
+  if (!m.ack && m.status !== "expired") { try { await playAck(m.productId, token); } catch (e) { /* senkron turu 3 gün içinde yeniden dener */ } }
+  res.json({ ok: true, user: pub(req.user) });
+});
+// Gerçek zamanlı geliştirici bildirimleri (Pub/Sub push). İsteğe bağlı: PLAY_RTDN_KEY verilirse /api/billing/play-rtdn?key=... açılır.
+app.post("/api/billing/play-rtdn", async (req, res) => {
+  if (!PLAY_ON || !PLAY_RTDN_KEY) return res.status(404).json({ error: "not_found" });
+  if (!safeEq(sha(String(new URL(req.url, "http://x").searchParams.get("key") || "")), sha(PLAY_RTDN_KEY))) return res.status(401).json({ error: "unauthorized" });
+  let ev = {}; try { ev = JSON.parse(Buffer.from(String(((req.body || {}).message || {}).data || ""), "base64").toString("utf8")); } catch (e) { return res.json({ ok: true, ignored: true }); }
+  if (ev.packageName && ev.packageName !== PLAY_PKG) return res.json({ ok: true, ignored: true });
+  const sn = ev.subscriptionNotification || {}, token = String(sn.purchaseToken || "");
+  if (!token) return res.json({ ok: true, ignored: true });
+  const row = db.prepare("SELECT user_id FROM plans WHERE provider='play' AND ext_id=?").get(token);
+  if (!row) return res.json({ ok: true, unknown: true }); // 200: Pub/Sub sonsuza dek yeniden denemesin
+  try {
+    const j = await playGet(token), m = j.invalid ? { status: "expired", ends: 0 } : playMap(j);
+    if (!m.pending) playApply(row.user_id, token, m);
+    res.json({ ok: true });
+  } catch (e) { res.status(503).json({ error: "play_unavailable" }); } // 5xx: Pub/Sub yeniden dener
+});
 // ===== BEGIN MEDIA PROXY =====
 // Görsel/video/ses: telefon operatörü r2.dev ya da R2 yükleme adresine ulaşamasa da uygulama yalnızca bu sunucuyla konuşur.
 const ISSUED = new Map(); // upload ile verilmiş anahtarlar: key -> { uid, type, size, exp }
@@ -3119,4 +3225,4 @@ if (require.main === module) {
   server.listen(PORT, () => console.log(`Pusula sunucusu :${PORT} · e-posta: ${HAS_MAIL ? "açık" : "kapalı (kodlar günlüğe yazılır)"} · doğrulama: ${REQUIRE_VERIFY ? "açık" : "kapalı"}`));
 }
 server.requestTimeout = 20 * 60e3; // büyük video yüklemeleri için
-module.exports = { server, db, sigV4Presign, digestRun };
+module.exports = { server, db, sigV4Presign, digestRun, playSyncAll };
