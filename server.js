@@ -578,7 +578,7 @@ const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.m
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) AND p.archived=0 AND p.hidden=0";
 
-S("me", (req, res) => res.json({ profile: pubProf(req.prof), storage: R2_ON, unread: db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
+S("me", (req, res) => res.json({ profile: pubProf(req.prof), storage: R2_ON, unread: -mutedUnread(req.user.id) + db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
 
 S("profile", (req, res) => {
   if (!limit("sprof:" + req.user.id, 20, 600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -1048,8 +1048,8 @@ function groupChats(me) {
   return out;
 }
 S("chats", needProf, (req, res) => {
-  const me = req.user.id, all = dmChats(me).concat(groupChats(me)).sort((a, b) => b.created - a.created);
-  res.json({ chats: all, unread: all.reduce((n, c) => n + c.unread, 0) });
+  const me = req.user.id, all = chatPrefsApply(me, dmChats(me).concat(groupChats(me))).sort((a, b) => (b.pin ? 1 : 0) - (a.pin ? 1 : 0) || b.created - a.created);
+  res.json({ chats: all, unread: all.reduce((n, c) => n + (c.mute ? 0 : c.unread), 0) });
 });
 S("react", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, kind = b.kind === "g" ? "g" : "d", id = Math.floor(+b.id || 0), emoji = String(b.emoji || "");
@@ -2796,6 +2796,37 @@ app.post("/api/panic", auth, wrap(async (req, res) => {
 }));
 // ===== END PACK44 =====
 
+// ===== BEGIN PACK45 =====
+// Sohbet sabitleme / sessize alma (DM: d:<kullanıcı adı>, grup: g:<id>)
+db.exec("CREATE TABLE IF NOT EXISTS chat_prefs(user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, ckey TEXT NOT NULL, pin INTEGER NOT NULL DEFAULT 0, mute INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,ckey))");
+const ckeyOf = c => c.type === "group" ? "g:" + c.id : "d:" + String(c.handle).toLowerCase();
+function chatPrefsApply(me, list) {
+  const m = new Map(db.prepare("SELECT ckey, pin, mute FROM chat_prefs WHERE user_id=?").all(me).map(r => [r.ckey, r]));
+  return list.map(c => { const p = m.get(ckeyOf(c)); return p ? Object.assign(c, { pin: !!p.pin, mute: !!p.mute }) : c; });
+}
+function mutedUnread(me) {
+  let n = 0;
+  for (const r of db.prepare("SELECT ckey FROM chat_prefs WHERE user_id=? AND mute=1").all(me)) {
+    if (r.ckey.startsWith("d:")) { const p = profByHandle(r.ckey.slice(2)); if (p) n += db.prepare("SELECT COUNT(*) n FROM msgs WHERE from_id=? AND to_id=? AND read=0").get(p.user_id, me).n; }
+    else { const g = db.prepare("SELECT last_read FROM group_members WHERE group_id=? AND user_id=?").get(r.ckey.slice(2), me); if (g) n += db.prepare("SELECT COUNT(*) n FROM gmsgs WHERE group_id=? AND id>? AND from_id<>?").get(r.ckey.slice(2), g.last_read, me).n; }
+  }
+  return n;
+}
+S("chat_pref", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (!limit("scp:" + me, 200, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  let key;
+  if (b.group) { if (!db.prepare("SELECT 1 FROM group_members WHERE group_id=? AND user_id=?").get(String(b.group), me)) return res.status(404).json({ error: "not_found" }); key = "g:" + String(b.group); }
+  else { const p = profByHandle(b.handle); if (!p || p.user_id === me || isBanned(p.user_id)) return res.status(404).json({ error: "not_found" }); key = "d:" + p.handle.toLowerCase(); }
+  const cur = db.prepare("SELECT pin, mute FROM chat_prefs WHERE user_id=? AND ckey=?").get(me, key) || { pin: 0, mute: 0 };
+  const pin = b.pin === undefined ? cur.pin : (b.pin ? 1 : 0), mute = b.mute === undefined ? cur.mute : (b.mute ? 1 : 0);
+  if (pin && !cur.pin && db.prepare("SELECT COUNT(*) n FROM chat_prefs WHERE user_id=? AND pin=1").get(me).n >= 5) return res.status(400).json({ error: "too_many_pins" });
+  if (!pin && !mute) db.prepare("DELETE FROM chat_prefs WHERE user_id=? AND ckey=?").run(me, key);
+  else db.prepare("INSERT OR REPLACE INTO chat_prefs(user_id,ckey,pin,mute) VALUES(?,?,?,?)").run(me, key, pin, mute);
+  res.json({ ok: true, pin: !!pin, mute: !!mute });
+});
+// ===== END PACK45 =====
+
 // ===== BEGIN MEDIA PROXY =====
 // Görsel/video/ses: telefon operatörü r2.dev ya da R2 yükleme adresine ulaşamasa da uygulama yalnızca bu sunucuyla konuşur.
 const ISSUED = new Map(); // upload ile verilmiş anahtarlar: key -> { uid, type, size, exp }
@@ -3016,9 +3047,24 @@ function legalFill(html, mtime) {
   html = put(html, "[30]", /^\d{1,3}$/.test(days) && +days >= 1 && +days <= 365 ? days : "");
   return put(put(html, "[TARİH]", date), "[DATE]", date);
 }
+// Dil paketleri: public/lang/<kod>.json varsa onu, yoksa sunucuyla gelen langpacks.json içindekini verir
+// (klasör GitHub'a yüklenmese bile çeviriler çalışsın). Kaynak: sv/langpacks.json
+let LANGPACKS = null;
+function langPack(req, res, code) {
+  let body = null;
+  try { const f = path.join(PUB, "lang", code + ".json"); if (fs.existsSync(f) && fs.statSync(f).isFile()) body = fs.readFileSync(f); } catch (e) {}
+  if (!body) {
+    try { if (LANGPACKS === null) LANGPACKS = JSON.parse(fs.readFileSync(path.join(__dirname, "langpacks.json"), "utf8")); } catch (e) { LANGPACKS = {}; }
+    if (LANGPACKS[code]) body = Buffer.from(JSON.stringify(LANGPACKS[code]));
+  }
+  if (!body) return res.json({ error: "not_found" }, 404);
+  res.statusCode = 200; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.setHeader("Cache-Control", "public, max-age=300");
+  res.end(req.method === "HEAD" ? undefined : body);
+}
 function serveStatic(req, res, pathname) {
   if (req.method !== "GET" && req.method !== "HEAD") return res.json({ error: "not_found" }, 404);
   { const pm = /^\/p\/([\w-]{3,40})\/?$/.exec(pathname); if (pm) return postPage(req, res, pm[1]); }
+  { const lg = /^\/lang\/(de|es|fr|pt|ru|ar|az|id|ja)\.json$/.exec(pathname); if (lg) return langPack(req, res, lg[1]); }
   if (INDEX === null) INDEX = loadIndex() || "";
   if (!INDEX) { res.statusCode = 200; res.setHeader("Content-Type", "text/plain; charset=utf-8"); return res.end("Pusula sunucusu çalışıyor. Uygulama dosyaları için public/index.html ekleyin."); }
   let p;
