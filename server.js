@@ -22,6 +22,7 @@ const PLAY_API = String(process.env.PLAY_API_BASE || "https://androidpublisher.g
 const PLAY_RTDN_KEY = String(process.env.PLAY_RTDN_KEY || "");
 const PLAY_SA = (() => { try { let x = String(process.env.PLAY_SERVICE_ACCOUNT || "").trim(); if (!x) return null; if (x[0] !== "{") x = Buffer.from(x, "base64").toString("utf8"); const j = JSON.parse(x); return j.client_email && j.private_key ? { email: String(j.client_email), key: String(j.private_key).replace(/\\n/g, "\n") } : null; } catch (e) { return null; } })();
 const PLAY_ON = !!PLAY_SA;
+const PLAY_DIAG = (() => { const raw = String(process.env.PLAY_SERVICE_ACCOUNT || "").trim(); if (!raw) return "env-yok"; try { let x = raw; if (x[0] !== "{") x = Buffer.from(x, "base64").toString("utf8"); const j = JSON.parse(x); if (!j.client_email) return "client_email-yok"; if (!j.private_key) return "private_key-yok"; return "ok"; } catch (e) { return "json-okunamadi(uzunluk " + raw.length + ", ilk:" + raw[0] + ")"; } })();
 const BILLING = LS_ON || PLAY_ON;
 const TRIAL_DAYS = process.env.TRIAL_DAYS !== undefined && process.env.TRIAL_DAYS !== "" ? +process.env.TRIAL_DAYS : 14;
 const FREE_MAX_DATA = +process.env.FREE_MAX_DATA_BYTES || 100 * 1024;
@@ -266,7 +267,7 @@ function auth(req, res, next) {
 }
 const wrap = f => f;
 
-app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus }));
+app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, play: PLAY_DIAG, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus }));
 
 app.post("/api/register", wrap(async (req, res) => {
   if (!limit("reg:" + req.ip, 10, 3600e3)) return res.status(429).json({ error: "rate_limited" });
