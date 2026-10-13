@@ -9,4 +9,7 @@ t((await(await fetch(B+"/ar/")).text()).includes('dir="rtl"'),"rtl");
 const x=await fetch(B+"/sitemap.xml");t(x.status===200&&(x.headers.get("content-type")||"").includes("xml")&&(await x.text()).includes('hreflang="de"'),"sitemap.xml");
 t((await(await fetch(B+"/robots.txt")).text()).includes("sitemap.xml"),"robots");
 t((await(await fetch(B+"/")).text()).includes('hreflang="ru"'),"index hreflang");
+for(const c of["de","es","fr","pt","ru","ar","az","id","ja"])for(const f of["privacy","rules","delete-account"]){const r=await fetch(B+"/"+c+"/"+f+".html");const h=await r.text();t(r.status===200&&h.includes('<html lang="'+c+'"')&&!h.includes("[DATE]")&&h.includes("[YOUR EMAIL]")||r.status===200&&h.includes('<html lang="'+c+'"')&&!h.includes("[DATE]"),"legal "+c+"/"+f);}
+t((await(await fetch(B+"/ar/privacy.html")).text()).includes('dir="rtl"'),"legal rtl");
+t((await(await fetch(B+"/ja/")).text()).includes('/ja/privacy.html'),"landing legal link");
 console.log("seo testleri geçti:",ok);p.kill();try{fs.unlinkSync(db)}catch(e){}})();

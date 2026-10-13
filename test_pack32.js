@@ -1,0 +1,10 @@
+const fs=require("fs"),path=require("path");
+const root=fs.existsSync(path.join(__dirname,"public"))?path.join(__dirname,"public"):path.join(__dirname,"..","si");
+let bad=0;const ok=(c,m)=>{if(!c){bad++;console.log("FAIL",m)}};
+const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
+["function lockCard","function lkShow","pusula_lock","id=\"lkset\""].forEach(s=>ok(html.includes(s),"index has "+s));
+const dict=JSON.parse(html.match(/<script id="i18n-dict"[^>]*>([\s\S]*?)<\/script>/)[1]);
+["Uygulama kilidi","Kilidi aç","PIN yanlış","Yeni PIN (#–# rakam)"].forEach(k=>ok(dict[k],"dict "+k));
+const K=["App lock","Unlock","Wrong PIN","New PIN (#–# digits)","After # min"];
+["de","es","fr","pt","ru","ar","az","id","ja"].forEach(l=>{const p=JSON.parse(fs.readFileSync(path.join(root,"lang",l+".json"),"utf8"));K.forEach(k=>{ok(p[k],l+" "+k);if(p[k])ok((p[k].match(/#/g)||[]).length===(k.match(/#/g)||[]).length,l+" # "+k)})});
+if(bad){console.log(bad+" hata");process.exit(1)}console.log("pack32 geçti");

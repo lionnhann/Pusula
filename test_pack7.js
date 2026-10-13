@@ -36,7 +36,7 @@ mock.listen(0, () => {
       await so("profile", { bio: "x", private: true }, B); await so("post", { kind: "text", text: "gizli seramik notu" }, B);
       r = await so("search_posts", { q: "gizli seramik" }, A); ok(r.posts.length === 0, "private account hidden from search");
       // bildirim tercihleri
-      r = await so("notif_prefs", {}, A); ok(r.groups.length === 9 && r.groups.every(g => g.on), "all on by default");
+      r = await so("notif_prefs", {}, A); ok(r.groups.length === 10 && r.groups.every(g => g.on), "all on by default");
       r = await so("notif_prefs", { grp: "nope", on: false }, A); ok(r.s === 400, "bad group");
       r = await so("notif_prefs", { grp: "like", on: false }, A); ok(!r.groups.find(g => g.grp === "like").on, "like off");
       await so("follow", { handle: "ali", on: true }, C);

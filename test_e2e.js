@@ -107,8 +107,8 @@ mock.listen(0, () => {
       pr = await up(uk, B, Buffer.from("abcdef")); ok(pr.status === 400, "other user cannot use my key");
       pr = await up("m/" + "x".repeat(5) + "/" + "1".repeat(24) + ".jpg", A, Buffer.from("abcdef")); ok(pr.status === 400, "unissued key rejected");
       pr = await up(uk, A, Buffer.from("abcdefghij")); ok(pr.status === 413, "oversize rejected");
-      r = await call("/api/social/upload", { type: "image/jpeg", size: 6 }, A); const uk2 = r.key;
-      pr = await up(uk2, A, Buffer.from("abcdef")); ok(pr.status === 200 && puts["/" + uk2] && puts["/" + uk2].toString() === "abcdef" && puts.__ct === "image/jpeg", "upload relayed to storage with issued type");
+      r = await call("/api/social/upload", { type: "image/jpeg", size: 12 }, A); const uk2 = r.key; const jpg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, 0x4A, 0x46, 0x49, 0x46, 0, 1]);
+      pr = await up(uk2, A, jpg); ok(pr.status === 200 && puts["/" + uk2] && puts["/" + uk2].equals(jpg) && puts.__ct === "image/jpeg", "upload relayed to storage with issued type");
       pr = await up(uk2, A, Buffer.from("abcdef")); ok(pr.status === 400, "key is single-use");
       console.log("OK " + n + " kontrol");
     } catch (e) { console.error("FAIL", e.message, "\n", e.stack.split("\n").slice(0, 3).join("\n")); process.exitCode = 1; }
