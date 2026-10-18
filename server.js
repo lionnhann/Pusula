@@ -572,20 +572,21 @@ const needProf = (req, res, next) => { if (!req.prof) return res.status(409).jso
 const S = (path, ...fns) => app.post("/api/social/" + path, auth, socialMw, ...fns);
 
 function postRows(rows, me) {
-  { const memo = new Map(); rows = rows.filter(r => { if (!memo.has(r.user_id)) memo.set(r.user_id, canSee(me, r.user_id)); return memo.get(r.user_id); }); }
+  { const memo = new Map(), t0 = now(); rows = rows.filter(r => { if (r.expires > 0 && r.expires <= t0) return false; if (!memo.has(r.user_id)) memo.set(r.user_id, canSee(me, r.user_id)); return memo.get(r.user_id); }); }
   if (!rows.length) return [];
   const ids = rows.map(r => r.id), ph = ids.map(() => "?").join(",");
   const lk = Object.fromEntries(db.prepare(`SELECT post_id, COUNT(*) n FROM likes WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids).map(r => [r.post_id, r.n]));
   const cm = Object.fromEntries(db.prepare(`SELECT post_id, COUNT(*) n FROM comments WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids).map(r => [r.post_id, r.n]));
   const mine = new Set(db.prepare(`SELECT post_id FROM likes WHERE user_id=? AND post_id IN (${ph})`).all(me, ...ids).map(r => r.post_id));
   const sv = new Set(db.prepare(`SELECT post_id FROM saves WHERE user_id=? AND post_id IN (${ph})`).all(me, ...ids).map(r => r.post_id));
+  const cw = new Set(rows.some(r => r.capsule > now()) ? db.prepare(`SELECT post_id FROM capsule_watch WHERE user_id=? AND post_id IN (${ph})`).all(me, ...ids).map(r => r.post_id) : []);
   const vw = Object.fromEntries(db.prepare(`SELECT post_id, COUNT(*) n FROM reel_views WHERE post_id IN (${ph}) GROUP BY post_id`).all(...ids).map(r => [r.post_id, r.n]));
   const cids = [...new Set(rows.map(r => r.community).filter(Boolean))], cmap = {};
   if (cids.length) for (const c of db.prepare(`SELECT id, handle, name FROM communities WHERE id IN (${cids.map(() => "?").join(",")})`).all(...cids)) cmap[c.id] = { handle: c.handle, name: c.name };
   const _sn = new Map(); const snd = id => { if (!id) return null; if (!_sn.has(id)) _sn.set(id, soundInfo(id)); return _sn.get(id); };
-  return withCollab(rows.map(r => ({ alt: r.alt || undefined, sound: snd(r.sound), place: r.place || "", images: r.kind === "photo" && parseMore(r.more).length ? [r.media, ...parseMore(r.more)].map(mediaUrl) : undefined, edited: undefined, community: r.community && cmap[r.community] ? cmap[r.community] : null, views: vw[r.id] || 0, poster: r.poster ? mediaUrl(r.poster) : "", saved: sv.has(r.id), id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), likes: lk[r.id] || 0, comments: cm[r.id] || 0, liked: mine.has(r.id), own: r.user_id === me })), me);
+  return withCollab(rows.map(r => ({ expires: r.expires > 0 ? r.expires : undefined, capsule: r.capsule > 0 ? r.capsule : undefined, watching: r.capsule > now() ? cw.has(r.id) : undefined, alt: r.alt || undefined, sound: snd(r.sound), place: r.place || "", images: r.kind === "photo" && parseMore(r.more).length ? [r.media, ...parseMore(r.more)].map(mediaUrl) : undefined, edited: undefined, community: r.community && cmap[r.community] ? cmap[r.community] : null, views: vw[r.id] || 0, poster: r.poster ? mediaUrl(r.poster) : "", saved: sv.has(r.id), id: r.id, kind: r.kind, text: r.text, media: mediaUrl(r.media), created: r.created, handle: r.handle, avatar: mediaUrl(r.avatar), likes: lk[r.id] || 0, comments: cm[r.id] || 0, liked: mine.has(r.id), own: r.user_id === me })), me);
 }
-const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.more, p.place, p.sound, p.community, p.created, p.alt, f.handle, f.avatar FROM posts p JOIN profiles f ON f.user_id=p.user_id";
+const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.more, p.place, p.sound, p.community, p.created, p.alt, p.capsule, p.expires, f.handle, f.avatar FROM posts p JOIN profiles f ON f.user_id=p.user_id";
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) AND p.archived=0 AND p.hidden=0";
 
@@ -653,8 +654,10 @@ S("post", needProf, (req, res) => {
   const mv = moreOk(req.user.id, kind, b.more); if (mv.error) return res.status(400).json({ error: mv.error });
   const place = cleanPlace(b.place), snd = kind === "text" ? "" : soundOk(b.sound);
   if (b.sound && !snd && kind !== "text") return res.status(400).json({ error: "bad_sound" });
+  let ttl = 0; if (b.ttl !== undefined && b.ttl !== null && b.ttl !== "") { ttl = Math.floor(+b.ttl); if (!(ttl >= 1 && ttl <= 720)) return res.status(400).json({ error: "bad_ttl" }); }
   const id = "p" + rnd(8);
   db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,more,community,created,place,pkey,sound) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(id, req.user.id, kind, text, kind === "text" ? "" : media, kind === "reel" ? poster : "", mv.json, cid, now(), place, nrm(place), snd); if (snd) soundUse(snd);
+  if (ttl) db.prepare("UPDATE posts SET expires=? WHERE id=?").run(now() + ttl * 3600e3, id);
   if (b.poll && kind !== "reel") { const pl = pollParse(b.poll); if (pl) db.prepare("INSERT INTO post_polls(post_id,opts,ends) VALUES(?,?,?)").run(id, JSON.stringify(pl.opts), now() + pl.hours * 3600e3); }
   if (kind === "reel" && b.replyTo) { const rt = db.prepare("SELECT id, user_id, kind, community FROM posts WHERE id=?").get(String(b.replyTo)); if (rt && rt.kind === "reel" && !rt.community && !blockedEither(req.user.id, rt.user_id) && canSee(req.user.id, rt.user_id)) { db.prepare("UPDATE posts SET reply_to=? WHERE id=?").run(rt.id, id); notify(rt.user_id, req.user.id, "reelreply", id, "Reels'ine yanıt verdi"); } }
   if (alt) db.prepare("UPDATE posts SET alt=? WHERE id=?").run(alt, id);
@@ -705,7 +708,9 @@ S("comment", needProf, (req, res) => {
   if (!limit("scom:" + req.user.id, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
   const id = String((req.body || {}).id || ""), text = cleanText((req.body || {}).text, 300), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id);
   if (!p || blockedEither(req.user.id, p.user_id) || !canSee(req.user.id, p.user_id)) return res.status(404).json({ error: "not_found" });
-  if (db.prepare("SELECT no_comments FROM posts WHERE id=?").get(id).no_comments) return res.status(403).json({ error: "comments_off" });
+  const pcf = db.prepare("SELECT no_comments, com_aud FROM posts WHERE id=?").get(id);
+  if (pcf.no_comments) return res.status(403).json({ error: "comments_off" });
+  if (pcf.com_aud && p.user_id !== req.user.id && !isFollowing(req.user.id, p.user_id)) return res.status(403).json({ error: "comments_followers" });
   if (!text) return res.status(400).json({ error: "empty" });
   if (wordBlocked(text)) return res.status(400).json({ error: "blocked_content" });
   let parent = "", pc = null;
@@ -743,7 +748,7 @@ S("user", needProf, (req, res) => {
   if (!p || isBanned(p.user_id)) return res.status(404).json({ error: "no_user" });
   const blocked = blockedEither(me, p.user_id);
   if (p.user_id !== me && !blocked && canSee(me, p.user_id) !== undefined) { try { const day = Math.floor(Date.now() / 864e5); db.prepare("INSERT OR IGNORE INTO profile_views(owner,viewer,day,created) VALUES(?,?,?,?)").run(p.user_id, me, day, now()); } catch (e) { /* yoksay */ } }
-  res.json({ profile: pubProf(p), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
+  res.json({ profile: pubProf(p), showcase: showcaseFor(p.user_id), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
     followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(p.user_id).n, following: db.prepare("SELECT COUNT(*) n FROM follows WHERE follower=?").get(p.user_id).n,
     posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=?").get(p.user_id).n, listings: db.prepare("SELECT COUNT(*) n FROM listings WHERE user_id=? AND status='active'").get(p.user_id).n, isFollowing: isFollowing(me, p.user_id),
     bell: !!db.prepare("SELECT 1 FROM post_bells WHERE user_id=? AND target=?").get(me, p.user_id), mutual: mutualOf(me, p.user_id, blocked), muted: mutedSet(me).has(p.user_id), private: !!p.private, requested: !!db.prepare("SELECT 1 FROM follow_requests WHERE follower=? AND followee=?").get(me, p.user_id), locked: !canSee(me, p.user_id) });
@@ -761,7 +766,7 @@ S("follow", needProf, (req, res) => {
   let requested = false;
   if ((req.body || {}).on) {
     if (p.private && !isFollowing(req.user.id, p.user_id)) { db.prepare("INSERT OR IGNORE INTO follow_requests(follower,followee,created) VALUES(?,?,?)").run(req.user.id, p.user_id, now()); notify(p.user_id, req.user.id, "freq", "", "", true); requested = true; }
-    else { db.prepare("INSERT OR IGNORE INTO follows(follower,followee,created) VALUES(?,?,?)").run(req.user.id, p.user_id, now()); notify(p.user_id, req.user.id, "follow", "", "", true); }
+    else { db.prepare("INSERT OR IGNORE INTO follows(follower,followee,created) VALUES(?,?,?)").run(req.user.id, p.user_id, now()); notify(p.user_id, req.user.id, "follow", "", "", true); milestoneCheck(p.user_id); }
   } else { db.prepare("DELETE FROM follows WHERE follower=? AND followee=?").run(req.user.id, p.user_id); db.prepare("DELETE FROM follow_requests WHERE follower=? AND followee=?").run(req.user.id, p.user_id); }
   res.json({ ok: true, requested, followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(p.user_id).n });
 });
@@ -919,6 +924,7 @@ const tagsOf = t => [...new Set([...String(t || "").matchAll(TAG_RE)].map(m => m
 function notify(to, actor, type, postId, text, once) {
   if (!to || to === actor || isBanned(actor) || blockedEither(to, actor)) return;
   if (typeof notifOff === "function" && notifOff(to, type)) return;
+  if (postId && db.prepare("SELECT 1 FROM post_mute WHERE post_id=? AND user_id=?").get(postId, to)) return; // gönderi sessize alınmış
   if (once && db.prepare("SELECT 1 FROM notifs WHERE user_id=? AND actor=? AND type=? AND post_id=?").get(to, actor, type, postId || "")) return;
   db.prepare("INSERT INTO notifs(user_id,actor,type,post_id,text,created) VALUES(?,?,?,?,?,?)").run(to, actor, type, postId || "", cleanText(String(text || "").replace(/\[\[rp:[^\]]*\]\]/g, ""), 80).replace(/\n/g, " "), now());
 }
@@ -1281,7 +1287,7 @@ S("msg_delete", needProf, (req, res) => {
 function purgeUserMedia(uid) {
   const keys = new Set();
   for (const c of db.prepare("SELECT handle FROM communities WHERE owner=?").all(uid)) deleteCommunity(c.handle);
-  for (const q of ["SELECT image media FROM listings WHERE user_id=?", "SELECT media FROM scheduled WHERE user_id=?", "SELECT poster media FROM scheduled WHERE user_id=?", "SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?"])
+  for (const q of ["SELECT image media FROM listings WHERE user_id=?", "SELECT media FROM scheduled WHERE user_id=?", "SELECT poster media FROM scheduled WHERE user_id=?", "SELECT media FROM posts WHERE user_id=?", "SELECT poster media FROM posts WHERE user_id=?", "SELECT media FROM stories WHERE user_id=?", "SELECT avatar media FROM profiles WHERE user_id=?", "SELECT media FROM gmsgs WHERE from_id=?", "SELECT media FROM capsules WHERE user_id=?"])
     for (const r of db.prepare(q).all(uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT media FROM msgs WHERE from_id=? OR to_id=?").all(uid, uid)) if (r.media) keys.add(r.media);
   for (const r of db.prepare("SELECT media FROM sounds WHERE user_id=?").all(uid)) if (r.media) keys.add(r.media);
@@ -2064,8 +2070,8 @@ function withCollab(list, me) {
   const rr = db.prepare(`SELECT p.id, f.handle, p.reply_to rid, (SELECT media FROM posts WHERE id=p.reply_to) rmedia FROM posts p JOIN profiles f ON f.user_id=(SELECT user_id FROM posts WHERE id=p.reply_to) WHERE p.reply_to<>'' AND p.id IN (${ids.map(() => "?").join(",")})`).all(...ids);
   const rm = new Map(rr.map(r => [r.id, { id: r.rid, handle: r.handle, media: mediaUrl(r.rmedia) }]));
   for (const x of list) if (rm.has(x.id)) x.replyTo = rm.get(x.id);
-  const fl = db.prepare(`SELECT id, no_comments nc, hide_likes hl FROM posts WHERE (no_comments=1 OR hide_likes=1) AND id IN (${ids.map(() => "?").join(",")})`).all(...ids);
-  for (const f of fl) { const x = list.find(y => y.id === f.id); if (!x) continue; if (f.nc) x.noCom = true; if (f.hl) { x.hideLikes = true; if (!x.own) x.likes = 0; } }
+  const fl = db.prepare(`SELECT id, no_comments nc, hide_likes hl, com_aud ca FROM posts WHERE (no_comments=1 OR hide_likes=1 OR com_aud=1) AND id IN (${ids.map(() => "?").join(",")})`).all(...ids);
+  for (const f of fl) { const x = list.find(y => y.id === f.id); if (!x) continue; if (f.nc) x.noCom = true; if (f.ca) x.comAud = true; if (f.hl) { x.hideLikes = true; if (!x.own) x.likes = 0; } }
   if (typeof pollsFor === "function") pollsFor(list, me);
   return list;
 }
@@ -2265,10 +2271,11 @@ S("post_opts", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, id = String(b.id || ""), p = db.prepare("SELECT user_id, no_comments nc, hide_likes hl FROM posts WHERE id=?").get(id);
   if (!p || p.user_id !== me) return res.status(404).json({ error: "not_found" });
   if (b.toggle === "comments") db.prepare("UPDATE posts SET no_comments=? WHERE id=?").run(p.nc ? 0 : 1, id);
+  else if (b.toggle === "audience") db.prepare("UPDATE posts SET com_aud=? WHERE id=?").run(db.prepare("SELECT com_aud FROM posts WHERE id=?").get(id).com_aud ? 0 : 1, id);
   else if (b.toggle === "likes") db.prepare("UPDATE posts SET hide_likes=? WHERE id=?").run(p.hl ? 0 : 1, id);
   else return res.status(400).json({ error: "bad_toggle" });
-  const q = db.prepare("SELECT no_comments nc, hide_likes hl FROM posts WHERE id=?").get(id);
-  res.json({ ok: true, noCom: !!q.nc, hideLikes: !!q.hl });
+  const q = db.prepare("SELECT no_comments nc, hide_likes hl, com_aud ca FROM posts WHERE id=?").get(id);
+  res.json({ ok: true, noCom: !!q.nc, hideLikes: !!q.hl, comAud: !!q.ca });
 });
 // ===== END PACK9 =====
 // ===== BEGIN PACK10 =====
@@ -3217,6 +3224,219 @@ async function bkRun(force) {
   finally { bkBusy = false; }
 }
 
+// ===== PACK 48: Zaman kapsülü (Pusula Medya) =====
+// İçerik, açılış tarihine kadar yalnızca yazarın göreceği ayrı bir tabloda mühürlü durur; herkese açık gönderide sadece ipucu yazısı vardır.
+// Tarih gelince içerik gönderiye yazılır, gönderi akışın en üstüne çıkar ve "açılınca haber ver" diyenlere bildirim gider.
+const CAPSULE_MIN = process.env.CAPSULE_MIN_MS !== undefined ? +process.env.CAPSULE_MIN_MS : 3600e3, CAPSULE_MAX = 5 * 365 * 864e5, CAPSULE_TICK = +process.env.CAPSULE_TICK_MS || 30000, CAPSULE_CAP = 10;
+try { db.exec("ALTER TABLE posts ADD COLUMN capsule INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+db.exec(`CREATE TABLE IF NOT EXISTS capsules(post_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', media TEXT NOT NULL DEFAULT '', unlock INTEGER NOT NULL, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS capsules_at ON capsules(unlock);
+CREATE TABLE IF NOT EXISTS capsule_watch(post_id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL, PRIMARY KEY(post_id, user_id));`);
+function capsuleTick() {
+  let due; try { due = db.prepare("SELECT * FROM capsules WHERE unlock<=? ORDER BY unlock LIMIT 20").all(now()); } catch (e) { return; }
+  for (const r of due) {
+    try {
+      if (!db.prepare("SELECT 1 FROM posts WHERE id=?").get(r.post_id)) { db.prepare("DELETE FROM capsules WHERE post_id=?").run(r.post_id); if (r.media) r2Del(r.media); continue; }
+      const ok = db.prepare("SELECT 1 FROM profiles WHERE user_id=?").get(r.user_id) && !isBanned(r.user_id) ? checkPostInput(r.user_id, { kind: r.kind, text: r.text, media: r.media }) : { error: "x" };
+      if (ok.error) { db.prepare("DELETE FROM posts WHERE id=?").run(r.post_id); db.prepare("DELETE FROM capsules WHERE post_id=?").run(r.post_id); if (r.media) r2Del(r.media); continue; }
+      db.prepare("UPDATE posts SET kind=?, text=?, media=?, created=? WHERE id=?").run(ok.kind, ok.text, ok.media, now(), r.post_id);
+      db.prepare("DELETE FROM capsules WHERE post_id=?").run(r.post_id);
+      afterPost(r.post_id, r.user_id, ok.text);
+      for (const w of db.prepare("SELECT user_id FROM capsule_watch WHERE post_id=?").all(r.post_id)) notify(w.user_id, r.user_id, "capsule", r.post_id, ok.text, true);
+      db.prepare("DELETE FROM capsule_watch WHERE post_id=?").run(r.post_id);
+    } catch (e) { console.error("capsule:", e.message); }
+  }
+  try { for (const r of db.prepare("SELECT post_id, media FROM capsules WHERE NOT EXISTS (SELECT 1 FROM posts p WHERE p.id=capsules.post_id) LIMIT 50").all()) { db.prepare("DELETE FROM capsules WHERE post_id=?").run(r.post_id); if (r.media) r2Del(r.media); } } catch (e) { /* yoksay */ }
+}
+setInterval(capsuleTick, CAPSULE_TICK).unref();
+S("capsule_new", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, at = Math.floor(+b.unlock);
+  if (!limit("scap:" + me, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!(at >= now() + CAPSULE_MIN - 1000) || at > now() + CAPSULE_MAX) return res.status(400).json({ error: "bad_time", min: CAPSULE_MIN });
+  if (db.prepare("SELECT COUNT(*) n FROM capsules WHERE user_id=?").get(me).n >= CAPSULE_CAP) return res.status(400).json({ error: "too_many_capsules" });
+  const v = checkPostInput(me, { kind: b.kind === "photo" ? "photo" : "text", text: b.text, media: b.media });
+  if (v.error) return res.status(v.status).json({ error: v.error });
+  const hint = cleanText(b.hint, 120) || "🔒 Zaman kapsülü";
+  if (wordBlocked(hint)) return res.status(400).json({ error: "blocked_content" });
+  const id = "p" + rnd(8);
+  db.prepare("INSERT INTO posts(id,user_id,kind,text,media,poster,more,community,created,capsule) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, me, "text", hint, "", "", "", "", now(), at);
+  db.prepare("INSERT INTO capsules(post_id,user_id,kind,text,media,unlock,created) VALUES(?,?,?,?,?,?,?)").run(id, me, v.kind, v.text, v.media, at, now());
+  res.json({ ok: true, id, unlock: at });
+});
+S("capsule_mine", needProf, (req, res) => {
+  const rows = db.prepare("SELECT post_id, kind, text, media, unlock, created FROM capsules WHERE user_id=? ORDER BY unlock").all(req.user.id);
+  res.json({ items: rows.map(r => ({ id: r.post_id, kind: r.kind, text: r.text, media: r.media ? mediaUrl(r.media) : "", unlock: r.unlock, created: r.created })), min: CAPSULE_MIN });
+});
+S("capsule_watch", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, id = String(b.id || ""), p = db.prepare("SELECT user_id, capsule FROM posts WHERE id=?").get(id);
+  if (!limit("scapw:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!p || !(p.capsule > now()) || !visible(me, p.user_id) || !canSee(me, p.user_id)) return res.status(404).json({ error: "not_found" });
+  const has = !!db.prepare("SELECT 1 FROM capsule_watch WHERE post_id=? AND user_id=?").get(id, me), want = b.on === undefined ? !has : !!b.on;
+  if (want && !has) db.prepare("INSERT OR IGNORE INTO capsule_watch(post_id,user_id,created) VALUES(?,?,?)").run(id, me, now());
+  if (!want && has) db.prepare("DELETE FROM capsule_watch WHERE post_id=? AND user_id=?").run(id, me);
+  res.json({ ok: true, watching: want, n: db.prepare("SELECT COUNT(*) n FROM capsule_watch WHERE post_id=?").get(id).n });
+});
+
+// ===== PACK 49: Kendi kendini silen gönderi (Pusula Medya) =====
+// Gönderi, yazarın seçtiği süre sonunda (1 saat - 30 gün) medyasıyla birlikte otomatik silinir. Süre dolunca akışlarda hemen gizlenir.
+try { db.exec("ALTER TABLE posts ADD COLUMN expires INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+db.exec("CREATE INDEX IF NOT EXISTS posts_exp ON posts(expires) WHERE expires>0");
+function expireTick() {
+  try {
+    for (const r of db.prepare("SELECT id, media, poster, more FROM posts WHERE expires>0 AND expires<=? LIMIT 50").all(now())) {
+      db.prepare("DELETE FROM posts WHERE id=?").run(r.id); db.prepare("UPDATE profiles SET pinned='' WHERE pinned=?").run(r.id); delPostMedia(r);
+    }
+  } catch (e) { console.error("expire:", e.message); }
+}
+setInterval(expireTick, +process.env.EXPIRE_TICK_MS || 30000).unref();
+
+// ===== PACK 53: Anılar - "Bu gün geçen yıllarda" (Pusula Medya) =====
+S("memories", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}; let tz = Math.floor(+b.tz || 0); if (!(tz >= -840 && tz <= 840)) tz = 0;
+  const t = now(), loc = new Date(t + tz * 60000), y = loc.getUTCFullYear(), m = loc.getUTCMonth(), d = loc.getUTCDate(), out = [];
+  for (let k = 1; k <= 6; k++) {
+    const st = Date.UTC(y - k, m, d); if (new Date(st).getUTCMonth() !== m) continue; // 29 Şubat olmayan yıllar atlanır
+    const a = st - tz * 60000;
+    const rows = db.prepare(`${POST_SEL} WHERE p.user_id=? AND p.archived=0 AND p.hidden=0 AND p.community='' AND (p.capsule=0 OR p.capsule<=?) AND p.created>=? AND p.created<? ORDER BY p.created DESC LIMIT 5`).all(me, t, a, a + 86400e3);
+    for (const p of postRows(rows, me)) { p.years = k; out.push(p); }
+  }
+  res.json({ posts: out.slice(0, 10) });
+});
+
+// ===== PACK 54: Paylaşım içgörüsü - seri ve en iyi saat (Pusula Medya) =====
+S("insights", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}; let tz = Math.floor(+b.tz || 0); if (!(tz >= -840 && tz <= 840)) tz = 0;
+  const t = now(), D = 86400e3;
+  const rows = db.prepare("SELECT p.created, (SELECT COUNT(*) FROM likes WHERE post_id=p.id) l, (SELECT COUNT(*) FROM comments WHERE post_id=p.id) c FROM posts p WHERE p.user_id=? AND p.archived=0 AND p.hidden=0 AND (p.capsule=0 OR p.capsule<=?) AND p.created>? ORDER BY p.created DESC LIMIT 2000").all(me, t, t - 400 * D);
+  const days = new Set(), hr = {}; let total = 0;
+  for (const r of rows) {
+    const loc = r.created + tz * 60000; days.add(Math.floor(loc / D));
+    if (r.created > t - 90 * D) { total++; const h = new Date(loc).getUTCHours(), o = hr[h] || (hr[h] = { hour: h, posts: 0, sc: 0 }); o.posts++; o.sc += r.l + 2 * r.c; }
+  }
+  const today = Math.floor((t + tz * 60000) / D); let streak = 0, d = days.has(today) ? today : today - 1; while (days.has(d)) { streak++; d--; }
+  let best = 0, run = 0, prev = null; for (const k of [...days].sort((a, b) => a - b)) { run = prev !== null && k === prev + 1 ? run + 1 : 1; prev = k; if (run > best) best = run; }
+  const slots = total >= 5 ? Object.values(hr).map(o => ({ hour: o.hour, posts: o.posts, avg: Math.round(o.sc / o.posts * 10) / 10 })).sort((a, b) => b.avg - a.avg || b.posts - a.posts).slice(0, 3) : [];
+  const top = db.prepare("SELECT p.id, p.text, p.kind, (SELECT COUNT(*) FROM likes WHERE post_id=p.id) l, (SELECT COUNT(*) FROM comments WHERE post_id=p.id) c FROM posts p WHERE p.user_id=? AND p.archived=0 AND p.hidden=0 AND (p.capsule=0 OR p.capsule<=?) AND p.created>? ORDER BY (l + 2*c) DESC, p.created DESC LIMIT 3").all(me, t, t - 90 * D)
+    .filter(r => r.l + r.c > 0).map(r => ({ id: r.id, kind: r.kind, text: cleanText(String(r.text || "").replace(/\[\[rp:[^\]]*\]\]/g, ""), 60).replace(/\n/g, " "), likes: r.l, comments: r.c }));
+  const weeks = new Array(8).fill(0);
+  for (const f of db.prepare("SELECT created FROM follows WHERE followee=? AND created>?").all(me, t - 56 * D)) { const i = Math.floor((t - f.created) / (7 * D)); if (i >= 0 && i < 8) weeks[7 - i]++; }
+  const followers = db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(me).n;
+  res.json({ streak, best, total, slots, top, growth: { weeks, total: followers, gain7: weeks[7] } });
+});
+
+// ===== PACK 55: gönderi bildirimlerini sessize al + takipçi dönüm noktaları (Pusula Medya) =====
+db.exec("CREATE TABLE IF NOT EXISTS post_mute(post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL, PRIMARY KEY(post_id, user_id))");
+S("post_mute", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, id = String(b.id || "");
+  const p = db.prepare("SELECT id, user_id FROM posts WHERE id=?").get(id);
+  if (!p || !canSee(me, p.user_id) || blockedEither(me, p.user_id)) return res.status(404).json({ error: "not_found" });
+  const has = !!db.prepare("SELECT 1 FROM post_mute WHERE post_id=? AND user_id=?").get(id, me);
+  if (b.on === undefined || b.on === null) return res.json({ muted: has });
+  if (b.on) {
+    if (!has) {
+      if (db.prepare("SELECT COUNT(*) n FROM post_mute WHERE user_id=?").get(me).n >= 500) return res.status(400).json({ error: "mute_limit" });
+      db.prepare("INSERT INTO post_mute(post_id,user_id,created) VALUES(?,?,?)").run(id, me, now());
+    }
+  } else db.prepare("DELETE FROM post_mute WHERE post_id=? AND user_id=?").run(id, me);
+  res.json({ muted: !!b.on });
+});
+const MILESTONES = [10, 50, 100, 250, 500, 1000, 5000, 10000];
+function milestoneCheck(uid) {
+  try {
+    const c = db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(uid).n;
+    if (MILESTONES.includes(c) && !db.prepare("SELECT 1 FROM notifs WHERE user_id=? AND type='milestone' AND text=?").get(uid, String(c)))
+      db.prepare("INSERT INTO notifs(user_id,actor,type,post_id,text,created) VALUES(?,?,?,?,?,?)").run(uid, uid, "milestone", "", String(c), now());
+  } catch (e) { /* yoksay */ }
+}
+
+// ===== PACK 57: başarılar (rozetler) + gizlilik kontrolü (Pusula Medya) =====
+const ACH = [["post1", "posts", 1], ["post10", "posts", 10], ["post50", "posts", 50], ["like10", "likes", 10], ["like100", "likes", 100], ["fol10", "followers", 10], ["fol100", "followers", 100], ["streak7", "best", 7], ["streak30", "best", 30], ["cap1", "caps", 1], ["com1", "comms", 1], ["cmt10", "cmts", 10]];
+function achCalc(uid, tz) {
+  const t = now(), D = 86400e3;
+  const rows = db.prepare("SELECT created FROM posts WHERE user_id=? AND archived=0 AND hidden=0 AND (capsule=0 OR capsule<=?) ORDER BY created DESC LIMIT 5000").all(uid, t);
+  const days = new Set(rows.map(r => Math.floor((r.created + tz * 60000) / D)));
+  let best = 0, run = 0, prev = null; for (const k of [...days].sort((a, b) => a - b)) { run = prev !== null && k === prev + 1 ? run + 1 : 1; prev = k; if (run > best) best = run; }
+  const V = {
+    posts: rows.length, best,
+    likes: db.prepare("SELECT COUNT(*) n FROM likes l JOIN posts p ON p.id=l.post_id WHERE p.user_id=? AND l.user_id<>?").get(uid, uid).n,
+    followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(uid).n,
+    caps: db.prepare("SELECT COUNT(*) n FROM capsules WHERE user_id=?").get(uid).n,
+    comms: db.prepare("SELECT COUNT(*) n FROM community_members WHERE user_id=?").get(uid).n,
+    cmts: db.prepare("SELECT COUNT(*) n FROM comments WHERE user_id=?").get(uid).n
+  };
+  return ACH.map(([id, k, goal]) => ({ id, v: Math.min(V[k], goal), goal, done: V[k] >= goal }));
+}
+try { db.exec("ALTER TABLE profiles ADD COLUMN showcase TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+const showcaseIds = uid => { const r = db.prepare("SELECT showcase FROM profiles WHERE user_id=?").get(uid); return r && r.showcase ? r.showcase.split(",").filter(x => ACH.some(a => a[0] === x)) : []; };
+function showcaseFor(uid) { const ids = showcaseIds(uid); if (!ids.length) return []; const ok = new Set(achCalc(uid, 0).filter(b => b.done).map(b => b.id)); return ids.filter(x => ok.has(x)).slice(0, 3); }
+S("achievements", needProf, (req, res) => {
+  const tz = Math.max(-840, Math.min(840, Math.floor(+(req.body || {}).tz || 0))), badges = achCalc(req.user.id, tz);
+  res.json({ badges, done: badges.filter(b => b.done).length, total: badges.length, showcase: showcaseIds(req.user.id) });
+});
+S("ach_showcase", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tz = Math.max(-840, Math.min(840, Math.floor(+b.tz || 0)));
+  if (!Array.isArray(b.ids)) return res.status(400).json({ error: "bad_ids" });
+  const ids = [...new Set(b.ids.map(String))];
+  if (ids.length > 3) return res.status(400).json({ error: "showcase_max" });
+  const ok = new Set(achCalc(me, tz).filter(x => x.done).map(x => x.id));
+  if (!ids.every(x => ok.has(x))) return res.status(400).json({ error: "not_earned" });
+  db.prepare("UPDATE profiles SET showcase=? WHERE user_id=?").run(ids.join(","), me);
+  res.json({ ok: true, showcase: ids });
+});
+S("privacy_check", needProf, (req, res) => {
+  const me = req.user.id, one = (q, ...a) => db.prepare(q).get(...a).n;
+  const tp = db.prepare("SELECT enabled FROM totp WHERE user_id=?").get(me);
+  res.json({
+    private: !!(req.prof && req.prof.private), totp: !!(tp && tp.enabled),
+    blocks: one("SELECT COUNT(*) n FROM blocks WHERE blocker=?", me), mutes: one("SELECT COUNT(*) n FROM mutes WHERE user_id=?", me),
+    words: one("SELECT COUNT(*) n FROM muted_words WHERE user_id=?", me), closeFriends: one("SELECT COUNT(*) n FROM close_friends WHERE user_id=?", me),
+    requests: one("SELECT COUNT(*) n FROM follow_requests WHERE followee=?", me), followers: one("SELECT COUNT(*) n FROM follows WHERE followee=?", me)
+  });
+});
+// ===== END PACK 57 =====
+// ===== PACK 58: takip dengesi + kişisel profil notları (Pusula Medya) =====
+db.exec(`CREATE TABLE IF NOT EXISTS user_notes(owner TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, target TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, note TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(owner, target))`);
+const PNOTE_MAX = 300;
+S("follow_balance", needProf, (req, res) => {
+  const me = req.user.id, OK = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
+  const row = r => ({ handle: r.handle, avatar: mediaUrl(r.avatar) });
+  const notBackQ = "FROM follows f JOIN profiles p ON p.user_id=f.followee WHERE f.follower=? AND NOT EXISTS(SELECT 1 FROM follows g WHERE g.follower=f.followee AND g.followee=?) " + OK;
+  const fansQ = "FROM follows f JOIN profiles p ON p.user_id=f.follower WHERE f.followee=? AND NOT EXISTS(SELECT 1 FROM follows g WHERE g.follower=? AND g.followee=f.follower) " + OK;
+  const notBack = db.prepare("SELECT p.handle, p.avatar " + notBackQ + " ORDER BY f.created DESC LIMIT 100").all(me, me, me, me).map(row);
+  const fans = db.prepare("SELECT p.handle, p.avatar " + fansQ + " ORDER BY f.created DESC LIMIT 100").all(me, me, me, me).map(row);
+  const nbN = db.prepare("SELECT COUNT(*) n " + notBackQ).get(me, me, me, me).n, fN = db.prepare("SELECT COUNT(*) n " + fansQ).get(me, me, me, me).n;
+  const following = db.prepare("SELECT COUNT(*) n FROM follows WHERE follower=?").get(me).n, followers = db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(me).n;
+  res.json({ notBack, notBackTotal: nbN, fans, fansTotal: fN, following, followers, mutual: Math.max(0, following - nbN) });
+});
+S("pnote_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle);
+  if (!p || p.user_id === me) return res.status(404).json({ error: "not_found" });
+  if (!limit("spn:" + me, 120, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const note = cleanText(b.note, 200);
+  if (!note) { db.prepare("DELETE FROM user_notes WHERE owner=? AND target=?").run(me, p.user_id); return res.json({ ok: true, note: "" }); }
+  if (!db.prepare("SELECT 1 FROM user_notes WHERE owner=? AND target=?").get(me, p.user_id) && db.prepare("SELECT COUNT(*) n FROM user_notes WHERE owner=?").get(me).n >= PNOTE_MAX) return res.status(400).json({ error: "too_many_notes" });
+  db.prepare("INSERT OR REPLACE INTO user_notes(owner,target,note,created) VALUES(?,?,?,?)").run(me, p.user_id, note, now());
+  res.json({ ok: true, note });
+});
+S("pnote_list", needProf, (req, res) => {
+  const rows = db.prepare("SELECT p.handle, n.note FROM user_notes n JOIN profiles p ON p.user_id=n.target WHERE n.owner=? ORDER BY n.created DESC LIMIT 300").all(req.user.id);
+  const notes = {}; for (const r of rows) notes[String(r.handle).toLowerCase()] = r.note;
+  res.json({ notes, count: rows.length, max: PNOTE_MAX });
+});
+// ===== END PACK 58 =====
+// ===== PACK 60: yorum kitlesi (herkes/yalnızca takipçiler) + eski gönderileri toplu arşivle (Pusula Medya) =====
+try { db.exec("ALTER TABLE posts ADD COLUMN com_aud INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+S("bulk_archive", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, days = Math.floor(+b.days);
+  if (!(days >= 30 && days <= 3650)) return res.status(400).json({ error: "bad_days" });
+  const cutoff = now() - days * 86400e3, pin = (db.prepare("SELECT pinned FROM profiles WHERE user_id=?").get(me) || {}).pinned || "";
+  const where = "user_id=? AND archived=0 AND created<? AND id<>? AND (capsule=0 OR capsule<=?)";
+  if (b.dry) return res.json({ ok: true, dry: true, n: db.prepare("SELECT COUNT(*) n FROM posts WHERE " + where).get(me, cutoff, pin, now()).n });
+  if (!limit("sbarc:" + me, 10, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const r = db.prepare("UPDATE posts SET archived=1 WHERE " + where).run(me, cutoff, pin, now());
+  res.json({ ok: true, n: Number(r.changes) });
+});
+// ===== END PACK 60 =====
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);
@@ -3226,4 +3446,4 @@ if (require.main === module) {
   server.listen(PORT, () => console.log(`Pusula sunucusu :${PORT} · e-posta: ${HAS_MAIL ? "açık" : "kapalı (kodlar günlüğe yazılır)"} · doğrulama: ${REQUIRE_VERIFY ? "açık" : "kapalı"}`));
 }
 server.requestTimeout = 20 * 60e3; // büyük video yüklemeleri için
-module.exports = { server, db, sigV4Presign, digestRun, playSyncAll };
+module.exports = { server, db, sigV4Presign, digestRun, playSyncAll, capsuleTick, expireTick };
