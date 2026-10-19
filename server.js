@@ -590,7 +590,7 @@ const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.m
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) AND p.archived=0 AND p.hidden=0";
 
-S("me", (req, res) => res.json({ profile: pubProf(req.prof), storage: R2_ON, unread: -mutedUnread(req.user.id) + db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
+S("me", (req, res) => res.json({ profile: pubProf(req.prof), links: linksFor(req.user.id), storage: R2_ON, unread: -mutedUnread(req.user.id) + db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
 
 S("profile", (req, res) => {
   if (!limit("sprof:" + req.user.id, 20, 600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -748,7 +748,7 @@ S("user", needProf, (req, res) => {
   if (!p || isBanned(p.user_id)) return res.status(404).json({ error: "no_user" });
   const blocked = blockedEither(me, p.user_id);
   if (p.user_id !== me && !blocked && canSee(me, p.user_id) !== undefined) { try { const day = Math.floor(Date.now() / 864e5); db.prepare("INSERT OR IGNORE INTO profile_views(owner,viewer,day,created) VALUES(?,?,?,?)").run(p.user_id, me, day, now()); } catch (e) { /* yoksay */ } }
-  res.json({ profile: pubProf(p), showcase: showcaseFor(p.user_id), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
+  res.json({ profile: pubProf(p), showcase: showcaseFor(p.user_id), links: linksFor(p.user_id), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
     followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(p.user_id).n, following: db.prepare("SELECT COUNT(*) n FROM follows WHERE follower=?").get(p.user_id).n,
     posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=?").get(p.user_id).n, listings: db.prepare("SELECT COUNT(*) n FROM listings WHERE user_id=? AND status='active'").get(p.user_id).n, isFollowing: isFollowing(me, p.user_id),
     bell: !!db.prepare("SELECT 1 FROM post_bells WHERE user_id=? AND target=?").get(me, p.user_id), mutual: mutualOf(me, p.user_id, blocked), muted: mutedSet(me).has(p.user_id), private: !!p.private, requested: !!db.prepare("SELECT 1 FROM follow_requests WHERE follower=? AND followee=?").get(me, p.user_id), locked: !canSee(me, p.user_id) });
@@ -3437,6 +3437,98 @@ S("bulk_archive", needProf, (req, res) => {
   res.json({ ok: true, n: Number(r.changes) });
 });
 // ===== END PACK 60 =====
+// ===== PACK 62: cihazlar arası senkron gönderi taslakları (Pusula Medya) =====
+db.exec(`CREATE TABLE IF NOT EXISTS post_drafts(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, updated INTEGER NOT NULL)`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_pdraft_user ON post_drafts(user_id, updated DESC)");
+const DRAFT_MAX = 20;
+S("draft_save", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, text = cleanText(b.text, 1000);
+  if (!text) return res.status(400).json({ error: "empty" });
+  if (!limit("sdr:" + me, 120, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const id = typeof b.id === "string" && /^[a-f0-9]{16}$/.test(b.id) ? b.id : "";
+  if (id && db.prepare("SELECT 1 FROM post_drafts WHERE id=? AND user_id=?").get(id, me)) {
+    db.prepare("UPDATE post_drafts SET text=?, updated=? WHERE id=? AND user_id=?").run(text, now(), id, me);
+    return res.json({ ok: true, id, text });
+  }
+  if (db.prepare("SELECT COUNT(*) n FROM post_drafts WHERE user_id=?").get(me).n >= DRAFT_MAX) return res.status(400).json({ error: "too_many_drafts" });
+  const nid = rnd(8);
+  db.prepare("INSERT INTO post_drafts(id,user_id,text,updated) VALUES(?,?,?,?)").run(nid, me, text, now());
+  res.json({ ok: true, id: nid, text });
+});
+S("draft_list", needProf, (req, res) => {
+  const rows = db.prepare("SELECT id, text, updated FROM post_drafts WHERE user_id=? ORDER BY updated DESC LIMIT ?").all(req.user.id, DRAFT_MAX);
+  res.json({ drafts: rows.map(r => ({ id: r.id, text: r.text, updated: Number(r.updated) })), max: DRAFT_MAX });
+});
+S("draft_del", needProf, (req, res) => {
+  const id = String((req.body || {}).id || "");
+  const r = db.prepare("DELETE FROM post_drafts WHERE id=? AND user_id=?").run(id, req.user.id);
+  res.json({ ok: true, removed: Number(r.changes) > 0 });
+});
+// ===== END PACK 62 =====
+// ===== PACK 63: ek profil bağlantıları (Pusula Medya) =====
+try { db.exec("ALTER TABLE profiles ADD COLUMN xlinks TEXT NOT NULL DEFAULT ''"); } catch (e) { /* var */ }
+const XLINK_MAX = 3;
+function linksFor(uid) {
+  const r = db.prepare("SELECT xlinks FROM profiles WHERE user_id=?").get(uid);
+  if (!r || !r.xlinks) return [];
+  try { return JSON.parse(r.xlinks).filter(x => x && typeof x.t === "string" && typeof x.u === "string").slice(0, XLINK_MAX); } catch (e) { return []; }
+}
+S("links_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (!Array.isArray(b.links)) return res.status(400).json({ error: "bad_links" });
+  if (b.links.length > XLINK_MAX) return res.status(400).json({ error: "too_many_links" });
+  if (!limit("slk:" + me, 30, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const out = [], seen = new Set();
+  for (const x of b.links) {
+    const t = cleanText(x && x.t, 30).replace(/\s+/g, " "), u = String((x && x.u) || "").trim();
+    if (!t && !u) continue;
+    if (!t) return res.status(400).json({ error: "link_title" });
+    if (!(u.length <= 150 && /^https:\/\/[^\s<>"'\\]+\.[^\s<>"'\\]+$/i.test(u))) return res.status(400).json({ error: "bad_url" });
+    const key = u.toLowerCase();
+    if (seen.has(key)) continue; seen.add(key);
+    out.push({ t, u });
+  }
+  db.prepare("UPDATE profiles SET xlinks=? WHERE user_id=?").run(out.length ? JSON.stringify(out) : "", me);
+  res.json({ ok: true, links: out });
+});
+// ===== END PACK 63 =====
+// ===== PACK 64: etiket setleri (Pusula Medya) =====
+db.exec(`CREATE TABLE IF NOT EXISTS tag_sets(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, tags TEXT NOT NULL, updated INTEGER NOT NULL)`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_tagset_user ON tag_sets(user_id, updated DESC)");
+const TAGSET_MAX = 10, TAGSET_TAGS = 10;
+function parseSetTags(raw) {
+  const seen = new Set(), out = [];
+  for (const m of String(raw == null ? "" : raw).slice(0, 600).matchAll(/[\p{L}\p{N}_]{2,30}/gu)) {
+    const t = m[0].toLowerCase();
+    if (seen.has(t)) continue; seen.add(t); out.push(t);
+    if (out.length >= TAGSET_TAGS) break;
+  }
+  return out;
+}
+S("tagset_save", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, name = cleanText(b.name, 20).replace(/\s+/g, " "), tags = parseSetTags(b.tags);
+  if (!name) return res.status(400).json({ error: "set_name" });
+  if (!tags.length) return res.status(400).json({ error: "set_tags" });
+  if (!limit("stg:" + me, 120, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const id = typeof b.id === "string" && /^[a-f0-9]{16}$/.test(b.id) ? b.id : "";
+  if (id && db.prepare("SELECT 1 FROM tag_sets WHERE id=? AND user_id=?").get(id, me)) {
+    db.prepare("UPDATE tag_sets SET name=?, tags=?, updated=? WHERE id=? AND user_id=?").run(name, tags.join(" "), now(), id, me);
+    return res.json({ ok: true, id, name, tags });
+  }
+  if (db.prepare("SELECT COUNT(*) n FROM tag_sets WHERE user_id=?").get(me).n >= TAGSET_MAX) return res.status(400).json({ error: "too_many_sets" });
+  const nid = rnd(8);
+  db.prepare("INSERT INTO tag_sets(id,user_id,name,tags,updated) VALUES(?,?,?,?,?)").run(nid, me, name, tags.join(" "), now());
+  res.json({ ok: true, id: nid, name, tags });
+});
+S("tagset_list", needProf, (req, res) => {
+  const rows = db.prepare("SELECT id, name, tags FROM tag_sets WHERE user_id=? ORDER BY updated DESC LIMIT ?").all(req.user.id, TAGSET_MAX);
+  res.json({ sets: rows.map(r => ({ id: r.id, name: r.name, tags: r.tags.split(" ").filter(Boolean) })), max: TAGSET_MAX });
+});
+S("tagset_del", needProf, (req, res) => {
+  const r = db.prepare("DELETE FROM tag_sets WHERE id=? AND user_id=?").run(String((req.body || {}).id || ""), req.user.id);
+  res.json({ ok: true, removed: Number(r.changes) > 0 });
+});
+// ===== END PACK 64 =====
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);
