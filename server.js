@@ -724,11 +724,11 @@ S("comment", needProf, (req, res) => {
 S("comments", needProf, (req, res) => {
   const id = String((req.body || {}).id || ""), p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(id), me = req.user.id;
   if (!p || blockedEither(me, p.user_id) || !canSee(me, p.user_id)) return res.status(404).json({ error: "not_found" });
-  const rows = db.prepare("SELECT c.id, c.user_id, c.text, c.created, c.parent, c.pinned, f.handle, (SELECT COUNT(*) FROM comment_likes l WHERE l.cid=c.id) lk, EXISTS(SELECT 1 FROM comment_likes l WHERE l.cid=c.id AND l.user_id=?) mine FROM comments c JOIN profiles f ON f.user_id=c.user_id WHERE c.post_id=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=c.user_id) OR (b.blocker=c.user_id AND b.blocked=?)) ORDER BY c.created LIMIT 300").all(me, id, me, me);
+  const rows = db.prepare("SELECT c.id, c.user_id, c.text, c.created, c.parent, c.pinned, c.edited, f.handle, (SELECT COUNT(*) FROM comment_likes l WHERE l.cid=c.id) lk, EXISTS(SELECT 1 FROM comment_likes l WHERE l.cid=c.id AND l.user_id=?) mine FROM comments c JOIN profiles f ON f.user_id=c.user_id WHERE c.post_id=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=c.user_id) OR (b.blocker=c.user_id AND b.blocked=?)) ORDER BY c.created LIMIT 300").all(me, id, me, me);
   const byTop = (req.body || {}).sort === "top", top = rows.filter(r => !r.parent).sort((x, y) => (y.pinned - x.pinned) || (byTop ? (y.lk - x.lk) : 0) || (x.created - y.created)), kids = {};
   for (const r of rows) if (r.parent) (kids[r.parent] = kids[r.parent] || []).push(r);
   const out = []; for (const t of top) { out.push(t); for (const k of kids[t.id] || []) out.push(k); }
-  res.json({ comments: out.map(r => ({ id: r.id, text: r.text, created: r.created, handle: r.handle, own: r.user_id === me || p.user_id === me, parent: r.parent || "", pinned: !!r.pinned, likes: r.lk, liked: !!r.mine, owner: p.user_id === me })) });
+  res.json({ comments: out.map(r => ({ id: r.id, text: r.text, created: r.created, handle: r.handle, own: r.user_id === me || p.user_id === me, parent: r.parent || "", pinned: !!r.pinned, edited: !!r.edited, author: r.user_id === me, likes: r.lk, liked: !!r.mine, owner: p.user_id === me })) });
 });
 S("delcomment", needProf, (req, res) => {
   const c = db.prepare("SELECT c.id, c.user_id, p.user_id AS owner FROM comments c JOIN posts p ON p.id=c.post_id WHERE c.id=?").get(String((req.body || {}).id || ""));
@@ -3529,6 +3529,92 @@ S("tagset_del", needProf, (req, res) => {
   res.json({ ok: true, removed: Number(r.changes) > 0 });
 });
 // ===== END PACK 64 =====
+// ===== PACK 65: kullanıcı listeleri (Pusula Medya) =====
+db.exec(`CREATE TABLE IF NOT EXISTS ulists(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, created INTEGER NOT NULL)`);
+db.exec(`CREATE TABLE IF NOT EXISTS ulist_members(list_id TEXT NOT NULL REFERENCES ulists(id) ON DELETE CASCADE, member TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, added INTEGER NOT NULL, PRIMARY KEY(list_id, member))`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_ulist_user ON ulists(user_id)");
+const ULIST_MAX = 10, ULIST_MEMBERS = 100;
+const myList = (me, id) => /^[a-f0-9]{16}$/.test(String(id || "")) ? db.prepare("SELECT id, name FROM ulists WHERE id=? AND user_id=?").get(String(id), me) : null;
+S("ulist_save", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, name = cleanText(b.name, 24).replace(/\s+/g, " ");
+  if (!name) return res.status(400).json({ error: "list_name" });
+  if (!limit("sul:" + me, 120, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (b.id) {
+    const l = myList(me, b.id); if (!l) return res.status(404).json({ error: "not_found" });
+    db.prepare("UPDATE ulists SET name=? WHERE id=?").run(name, l.id); return res.json({ ok: true, id: l.id, name });
+  }
+  if (db.prepare("SELECT COUNT(*) n FROM ulists WHERE user_id=?").get(me).n >= ULIST_MAX) return res.status(400).json({ error: "too_many_lists" });
+  const id = rnd(8); db.prepare("INSERT INTO ulists(id,user_id,name,created) VALUES(?,?,?,?)").run(id, me, name, now());
+  res.json({ ok: true, id, name });
+});
+S("ulist_all", needProf, (req, res) => {
+  const me = req.user.id, target = (req.body || {}).handle ? profByHandle(req.body.handle) : null;
+  const rows = db.prepare("SELECT l.id, l.name, (SELECT COUNT(*) FROM ulist_members m WHERE m.list_id=l.id) n FROM ulists l WHERE l.user_id=? ORDER BY l.created ASC LIMIT ?").all(me, ULIST_MAX);
+  res.json({ lists: rows.map(r => ({ id: r.id, name: r.name, n: Number(r.n), has: target ? !!db.prepare("SELECT 1 FROM ulist_members WHERE list_id=? AND member=?").get(r.id, target.user_id) : false })), max: ULIST_MAX });
+});
+S("ulist_member", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, l = myList(me, b.id);
+  if (!l) return res.status(404).json({ error: "not_found" });
+  const p = profByHandle(b.handle); if (!p) return res.status(404).json({ error: "no_user" });
+  if (!limit("sulm:" + me, 300, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (b.on === false) { db.prepare("DELETE FROM ulist_members WHERE list_id=? AND member=?").run(l.id, p.user_id); return res.json({ ok: true, on: false }); }
+  if (p.user_id === me) return res.status(400).json({ error: "self" });
+  if (blockedEither(me, p.user_id)) return res.status(403).json({ error: "blocked" });
+  if (!db.prepare("SELECT 1 FROM ulist_members WHERE list_id=? AND member=?").get(l.id, p.user_id)) {
+    if (db.prepare("SELECT COUNT(*) n FROM ulist_members WHERE list_id=?").get(l.id).n >= ULIST_MEMBERS) return res.status(400).json({ error: "list_full" });
+    db.prepare("INSERT INTO ulist_members(list_id,member,added) VALUES(?,?,?)").run(l.id, p.user_id, now());
+  }
+  res.json({ ok: true, on: true });
+});
+S("ulist_members", needProf, (req, res) => {
+  const me = req.user.id, l = myList(me, (req.body || {}).id);
+  if (!l) return res.status(404).json({ error: "not_found" });
+  const rows = db.prepare("SELECT p.handle, p.avatar FROM ulist_members m JOIN profiles p ON p.user_id=m.member WHERE m.list_id=? AND NOT EXISTS(SELECT 1 FROM bans x WHERE x.user_id=p.user_id) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?)) ORDER BY m.added DESC LIMIT ?").all(l.id, me, me, ULIST_MEMBERS);
+  res.json({ name: l.name, members: rows.map(r => ({ handle: r.handle, avatar: mediaUrl(r.avatar) })) });
+});
+S("ulist_del", needProf, (req, res) => {
+  const me = req.user.id, l = myList(me, (req.body || {}).id);
+  if (l) db.prepare("DELETE FROM ulists WHERE id=?").run(l.id);
+  res.json({ ok: true, removed: !!l });
+});
+S("ulist_feed", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, l = myList(me, b.id), before = +b.before || now() + 1;
+  if (!l) return res.status(404).json({ error: "not_found" });
+  const rows = db.prepare(`${POST_SEL} WHERE p.community='' AND p.created<? AND p.user_id IN (SELECT member FROM ulist_members WHERE list_id=?) ${NOT_BLOCKED} ${NOT_BANNED} AND ${TAG_VIS} ORDER BY p.created DESC LIMIT 20`).all(before, l.id, me, me, me, me);
+  res.json({ posts: postRows(rows, me), name: l.name });
+});
+// ===== END PACK 65 =====
+// ===== PACK 66: yorum düzenleme + toplu takip isteği yanıtı (Pusula Medya) =====
+try { db.exec("ALTER TABLE comments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* var */ }
+const COMMENT_EDIT_MS = 15 * 60e3;
+S("comment_edit", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, text = cleanText(b.text, 300);
+  const c = db.prepare("SELECT id, user_id, text, created, post_id FROM comments WHERE id=?").get(String(b.id || ""));
+  if (!c || c.user_id !== me) return res.status(404).json({ error: "not_found" });
+  const p = db.prepare("SELECT user_id FROM posts WHERE id=?").get(c.post_id);
+  if (!p || blockedEither(me, p.user_id)) return res.status(404).json({ error: "not_found" });
+  if (now() - Number(c.created) > COMMENT_EDIT_MS) return res.status(403).json({ error: "edit_expired" });
+  if (!limit("sced:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!text) return res.status(400).json({ error: "empty" });
+  if (wordBlocked(text)) return res.status(400).json({ error: "blocked_content" });
+  if (text === c.text) return res.json({ ok: true, text, edited: false });
+  db.prepare("UPDATE comments SET text=?, edited=? WHERE id=?").run(text, now(), c.id);
+  res.json({ ok: true, text, edited: true });
+});
+S("fr_bulk", needProf, (req, res) => {
+  const me = req.user.id, accept = (req.body || {}).accept === true;
+  if (!limit("sfrb:" + me, 30, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const rows = db.prepare("SELECT follower FROM follow_requests WHERE followee=? ORDER BY created ASC LIMIT 500").all(me);
+  let n = 0;
+  for (const r of rows) {
+    if (blockedEither(me, r.follower)) { db.prepare("DELETE FROM follow_requests WHERE follower=? AND followee=?").run(r.follower, me); continue; }
+    db.prepare("DELETE FROM follow_requests WHERE follower=? AND followee=?").run(r.follower, me);
+    if (accept) { db.prepare("INSERT OR IGNORE INTO follows(follower,followee,created) VALUES(?,?,?)").run(r.follower, me, now()); notify(r.follower, me, "facc", "", "", true); }
+    n++;
+  }
+  res.json({ ok: true, n, accepted: accept });
+});
+// ===== END PACK 66 =====
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);
