@@ -267,7 +267,7 @@ function auth(req, res, next) {
 }
 const wrap = f => f;
 
-app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, play: PLAY_DIAG, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus }));
+app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, play: PLAY_DIAG, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus, app: appOk(), lang: fs.existsSync(path.join(PUB, "lang")) }));
 
 app.post("/api/register", wrap(async (req, res) => {
   if (!limit("reg:" + req.ip, 10, 3600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -365,6 +365,10 @@ app.post("/api/delete", auth, wrap(async (req, res) => {
   const pl = db.prepare("SELECT status, provider FROM plans WHERE user_id=?").get(req.user.id);
   if (pl && (pl.provider === "ls" || pl.provider === "play") && ["active", "on_trial", "past_due"].includes(pl.status)) return res.status(409).json({ error: "cancel_subscription_first" });
   try { purgeUserMedia(req.user.id); } catch (e) { /* depolama temizliği en iyi çaba */ }
+  try { // kaybolan mesaj ayarları kullanıcı kimliğiyle anahtarlandığı için zincirleme silinmez: bu kullanıcının sohbetleri ve sahibi olduğu gruplar
+    for (const g of db.prepare("SELECT id FROM chat_groups WHERE owner=?").all(req.user.id)) db.prepare("DELETE FROM chat_ttl WHERE ckey=?").run("g:" + g.id);
+    db.prepare("DELETE FROM chat_ttl WHERE ckey LIKE ? OR ckey LIKE ?").run("d:" + req.user.id + ":%", "d:%:" + req.user.id);
+  } catch (e) { /* en iyi çaba */ }
   db.prepare("DELETE FROM users WHERE id=?").run(req.user.id); // sessions, codes, data zincirleme silinir
   res.json({ ok: true });
 }));
@@ -598,7 +602,7 @@ const POST_SEL = "SELECT p.id, p.user_id, p.kind, p.text, p.media, p.poster, p.m
 const NOT_BLOCKED = "AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=? AND b.blocked=p.user_id) OR (b.blocker=p.user_id AND b.blocked=?))";
 const NOT_BANNED = "AND NOT EXISTS(SELECT 1 FROM hidden_users x WHERE x.user_id=p.user_id) AND p.archived=0 AND p.hidden=0";
 
-S("me", (req, res) => res.json({ receipts: receiptsOn(req.user.id), dmWho: dmWho(req.user.id), status: statusFor(req.user.id), frozen: isFrozen(req.user.id), profile: pubProf(req.prof), links: linksFor(req.user.id), interests: interestsFor(req.user.id), storage: R2_ON, unread: -mutedUnread(req.user.id) + db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
+S("me", (req, res) => res.json({ lastSeen: lastSeenOn(req.user.id), accent: accentFor(req.user.id), receipts: receiptsOn(req.user.id), dmWho: dmWho(req.user.id), status: statusFor(req.user.id), frozen: isFrozen(req.user.id), profile: pubProf(req.prof), links: linksFor(req.user.id), interests: interestsFor(req.user.id), storage: R2_ON, unread: -mutedUnread(req.user.id) + db.prepare("SELECT COUNT(*) n FROM msgs WHERE to_id=? AND read=0").get(req.user.id).n + db.prepare("SELECT COUNT(*) n FROM gmsgs x JOIN group_members m ON m.group_id=x.group_id AND m.user_id=? WHERE x.id>m.last_read AND x.from_id<>?").get(req.user.id, req.user.id).n, notif: db.prepare("SELECT COUNT(*) n FROM notifs WHERE user_id=? AND read=0").get(req.user.id).n }));
 
 S("profile", (req, res) => {
   if (!limit("sprof:" + req.user.id, 20, 600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -756,7 +760,7 @@ S("user", needProf, (req, res) => {
   if (!p || (isBanned(p.user_id) && p.user_id !== me)) return res.status(404).json({ error: "no_user" });
   const blocked = blockedEither(me, p.user_id);
   if (p.user_id !== me && !blocked && canSee(me, p.user_id) !== undefined) { try { const day = Math.floor(Date.now() / 864e5); db.prepare("INSERT OR IGNORE INTO profile_views(owner,viewer,day,created) VALUES(?,?,?,?)").run(p.user_id, me, day, now()); } catch (e) { /* yoksay */ } }
-  res.json({ profile: pubProf(p), canDm: p.user_id === me ? true : canDmTo(me, p.user_id), status: statusFor(p.user_id), showcase: showcaseFor(p.user_id), links: linksFor(p.user_id), interests: interestsFor(p.user_id), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
+  res.json({ booking: rvOn(p.user_id), accent: accentFor(p.user_id), profile: pubProf(p), canDm: p.user_id === me ? true : canDmTo(me, p.user_id), status: statusFor(p.user_id), showcase: showcaseFor(p.user_id), links: linksFor(p.user_id), interests: interestsFor(p.user_id), self: p.user_id === me, blocked, iBlocked: !!db.prepare("SELECT 1 FROM blocks WHERE blocker=? AND blocked=?").get(me, p.user_id),
     followers: db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=?").get(p.user_id).n, following: db.prepare("SELECT COUNT(*) n FROM follows WHERE follower=?").get(p.user_id).n,
     posts: db.prepare("SELECT COUNT(*) n FROM posts WHERE user_id=?").get(p.user_id).n, listings: db.prepare("SELECT COUNT(*) n FROM listings WHERE user_id=? AND status='active'").get(p.user_id).n, isFollowing: isFollowing(me, p.user_id),
     bell: !!db.prepare("SELECT 1 FROM post_bells WHERE user_id=? AND target=?").get(me, p.user_id), mutual: mutualOf(me, p.user_id, blocked), muted: mutedSet(me).has(p.user_id), private: !!p.private, requested: !!db.prepare("SELECT 1 FROM follow_requests WHERE follower=? AND followee=?").get(me, p.user_id), locked: !canSee(me, p.user_id) });
@@ -797,6 +801,7 @@ S("report", needProf, (req, res) => {
 // Mesajlaşma: uçtan uca şifreli (sunucu yalnızca şifreli metin görür)
 db.exec("CREATE TABLE IF NOT EXISTS dm_decl(user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, other_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL, PRIMARY KEY(user_id, other_id))");
 S("inbox", needProf, (req, res) => {
+  expireMsgs();
   const me = req.user.id;
   const rows = db.prepare(`SELECT m.id, m.from_id, m.to_id, m.text, m.media, m.created FROM msgs m WHERE m.id IN (SELECT MAX(id) FROM msgs WHERE from_id=? OR to_id=? GROUP BY CASE WHEN from_id=? THEN to_id ELSE from_id END) ORDER BY m.id DESC LIMIT 50`).all(me, me, me);
   const out = [];
@@ -813,11 +818,12 @@ S("thread", needProf, (req, res) => {
   const me = req.user.id, p = profByHandle((req.body || {}).handle);
   if (!p || blockedEither(me, p.user_id)) return res.status(404).json({ error: "not_found" });
   const after = +(req.body || {}).after || 0;
-  const rows = db.prepare("SELECT id, from_id, text, media, created FROM msgs WHERE id>? AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) ORDER BY id DESC LIMIT 60").all(after, me, p.user_id, p.user_id, me).reverse();
+  expireMsgs();
+  const rows = db.prepare("SELECT id, from_id, text, media, created, exp FROM msgs WHERE id>? AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) ORDER BY id DESC LIMIT 60").all(after, me, p.user_id, p.user_id, me).reverse();
   db.prepare("UPDATE msgs SET read=1 WHERE from_id=? AND to_id=? AND read=0").run(p.user_id, me);
   const rm = reactMap("d", rows.map(r => r.id), me);
   const seen = receiptsOn(me) && receiptsOn(p.user_id) ? (db.prepare("SELECT MAX(id) m FROM msgs WHERE from_id=? AND to_id=? AND read=1").get(me, p.user_id).m || 0) : 0;
-  res.json({ seen, receipts: receiptsOn(me), msgs: rows.map(r => withRe({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created }, rm)), handle: p.handle, avatar: mediaUrl(p.avatar), typing: typing("d:" + p.user_id + ":" + me) });
+  res.json({ ttl: ttlOf(ttlD(me, p.user_id)), lastSeen: lastSeenFor(me, p.user_id), seen, receipts: receiptsOn(me), msgs: rows.map(r => withRe({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, exp: r.exp || 0 }, rm)), handle: p.handle, avatar: mediaUrl(p.avatar), typing: typing("d:" + p.user_id + ":" + me) });
 });
 S("send", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle), text = String(b.text || ""), media = String(b.media || "");
@@ -958,10 +964,14 @@ function purge() {
 setInterval(purge, 10 * 60e3).unref();
 const visible = (me, owner) => owner === me || (!blockedEither(me, owner) && !isBanned(owner));
 const mediaLabel = m => /\.enc$/.test(m) ? "🔒 Şifreli ek" : /\.(weba|m4a|ogg)$/.test(m) ? "🎤 Sesli mesaj" : /\.(mp4|webm|mov)$/.test(m) ? "🎬 Video" : "📷 Fotoğraf";
+db.exec(`CREATE TABLE IF NOT EXISTS msg_stars(user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL, msg_id INTEGER NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(user_id,kind,msg_id))`);
 function reactMap(kind, ids, me) {
   const out = new Map(); if (!ids.length) return out;
   for (const r of db.prepare(`SELECT msg_id, user_id, emoji FROM reacts WHERE kind=? AND msg_id IN (${ids.map(() => "?").join(",")})`).all(kind, ...ids)) {
     const o = out.get(r.msg_id) || { re: {}, my: "" }; o.re[r.emoji] = (o.re[r.emoji] || 0) + 1; if (r.user_id === me) o.my = r.emoji; out.set(r.msg_id, o);
+  }
+  for (const r of db.prepare(`SELECT msg_id FROM msg_stars WHERE user_id=? AND kind=? AND msg_id IN (${ids.map(() => "?").join(",")})`).all(me, kind, ...ids)) {
+    const o = out.get(r.msg_id) || { re: {}, my: "" }; o.star = true; out.set(r.msg_id, o);
   }
   return out;
 }
@@ -1075,6 +1085,7 @@ function groupChats(me) {
   return out;
 }
 S("chats", needProf, (req, res) => {
+  expireMsgs();
   const me = req.user.id, all = chatPrefsApply(me, dmChats(me).concat(groupChats(me))).sort((a, b) => (b.pin ? 1 : 0) - (a.pin ? 1 : 0) || b.created - a.created);
   res.json({ chats: all, unread: all.reduce((n, c) => n + (c.mute ? 0 : c.unread), 0) });
 });
@@ -1119,12 +1130,13 @@ S("gthread", needProf, (req, res) => {
   const me = req.user.id, gid = String((req.body || {}).id || ""), g = db.prepare("SELECT id, name, owner FROM chat_groups WHERE id=?").get(gid);
   if (!g || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
   const after = +(req.body || {}).after || 0;
-  const rows = db.prepare("SELECT x.id, x.from_id, x.text, x.media, x.created, f.handle FROM gmsgs x JOIN profiles f ON f.user_id=x.from_id WHERE x.group_id=? AND x.id>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker=? AND b.blocked=x.from_id) ORDER BY x.id DESC LIMIT 60").all(gid, after, me).reverse();
+  expireMsgs();
+  const rows = db.prepare("SELECT x.id, x.from_id, x.text, x.media, x.created, x.exp, f.handle FROM gmsgs x JOIN profiles f ON f.user_id=x.from_id WHERE x.group_id=? AND x.id>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker=? AND b.blocked=x.from_id) ORDER BY x.id DESC LIMIT 60").all(gid, after, me).reverse();
   const top = db.prepare("SELECT MAX(id) m FROM gmsgs WHERE group_id=?").get(gid).m || 0;
   db.prepare("UPDATE group_members SET last_read=? WHERE group_id=? AND user_id=?").run(top, gid, me);
   const rm = reactMap("g", rows.map(r => r.id), me), mem = db.prepare("SELECT m.user_id, f.handle FROM group_members m JOIN profiles f ON f.user_id=m.user_id WHERE m.group_id=?").all(gid);
-  res.json({ name: g.name, owner: g.owner === me, members: mem.map(x => x.handle), typing: mem.filter(x => x.user_id !== me && typing("g:" + gid + ":" + x.user_id)).map(x => x.handle),
-    msgs: rows.map(r => withRe({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created }, rm)) });
+  res.json({ ttl: ttlOf(ttlG(gid)), name: g.name, owner: g.owner === me, members: mem.map(x => x.handle), typing: mem.filter(x => x.user_id !== me && typing("g:" + gid + ":" + x.user_id)).map(x => x.handle),
+    msgs: rows.map(r => withRe({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, exp: r.exp || 0 }, rm)) });
 });
 S("gsend", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, gid = String(b.id || ""), text = String(b.text || ""), media = String(b.media || "");
@@ -1153,7 +1165,7 @@ S("gleave", needProf, (req, res) => {
   if (!g || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
   db.prepare("DELETE FROM group_members WHERE group_id=? AND user_id=?").run(gid, me);
   const next = db.prepare("SELECT user_id FROM group_members WHERE group_id=? LIMIT 1").get(gid);
-  if (!next) db.prepare("DELETE FROM chat_groups WHERE id=?").run(gid); else if (g.owner === me) db.prepare("UPDATE chat_groups SET owner=? WHERE id=?").run(next.user_id, gid);
+  if (!next) { db.prepare("DELETE FROM chat_groups WHERE id=?").run(gid); try { db.prepare("DELETE FROM chat_ttl WHERE ckey=?").run("g:" + gid); } catch (e) { /* tablo henüz yoksa */ } } else if (g.owner === me) db.prepare("UPDATE chat_groups SET owner=? WHERE id=?").run(next.user_id, gid);
   res.json({ ok: true });
 });
 // ===== END SOCIAL2 =====
@@ -1291,6 +1303,7 @@ S("msg_delete", needProf, (req, res) => {
     if (m) db.prepare("DELETE FROM msgs WHERE id=? AND from_id=?").run(id, me);
   }
   if (!m) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM msg_stars WHERE kind=? AND msg_id=?").run(b.kind === "g" ? "g" : "d", id);
   if (m.media) r2Del(m.media);
   res.json({ ok: true });
 });
@@ -2212,7 +2225,7 @@ S("search_posts", needProf, (req, res) => {
   const rows = db.prepare(`${POST_SEL} WHERE p.community='' AND p.text LIKE ? ESCAPE '\\' ${NOT_BLOCKED} ${NOT_BANNED} AND (p.user_id=? OR NOT EXISTS(SELECT 1 FROM profiles z WHERE z.user_id=p.user_id AND z.private=1) OR EXISTS(SELECT 1 FROM follows w WHERE w.follower=? AND w.followee=p.user_id)) ORDER BY p.created DESC LIMIT 20`).all("%" + q + "%", me, me, me, me);
   res.json({ posts: postRows(rows, me) });
 });
-const NOTIF_GRP = { like: ["like", "clike"], comment: ["comment", "reply"], follow: ["follow", "freq", "facc", "newpost"], mention: ["mention"], live: ["live"], order: ["order", "order_accepted", "order_declined", "order_done", "order_cancelled"], collab: ["collab", "collab_ok"], story: ["sreact", "sanswer"], reel: ["reelreply"], repost: ["repost"] };
+const NOTIF_GRP = { like: ["like", "clike"], comment: ["comment", "reply"], follow: ["follow", "freq", "facc", "newpost"], mention: ["mention"], live: ["live"], order: ["order", "order_accepted", "order_declined", "order_done", "order_cancelled"], collab: ["collab", "collab_ok"], story: ["sreact", "sanswer"], reel: ["reelreply"], repost: ["repost"], booking: ["rv", "rv_ok", "rv_no", "rv_cancel"] };
 function notifOff(uid, type) {
   const g = Object.keys(NOTIF_GRP).find(k => NOTIF_GRP[k].includes(type)); if (!g) return false;
   return !!db.prepare("SELECT 1 FROM notif_off WHERE user_id=? AND grp=?").get(uid, g);
@@ -3185,6 +3198,9 @@ function langPack(req, res, code) {
   res.statusCode = 200; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.setHeader("Cache-Control", "public, max-age=300");
   res.end(req.method === "HEAD" ? undefined : body);
 }
+// public/index.html uygulama dosyası mı (tanıtım sayfası yanlışlıkla üstüne yüklenmiş olabilir)?
+function appOk() { try { if (INDEX === null) INDEX = loadIndex() || ""; } catch (e) { return false; } return /id="main"/.test(INDEX); }
+const WRONG_INDEX = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font:16px system-ui;max-width:560px;margin:40px auto;padding:0 16px;line-height:1.5"><h2>⚠️ Uygulama dosyası yanlış yüklenmiş</h2><p><code>public/index.html</code> uygulama değil, tanıtım sayfası. Pusula-site-github.zip içindeki <b>index.html</b> dosyasını GitHub\'da <code>public</code> klasörüne yeniden yükle (klasörleri düzleştirmeden, zip\'in içindekilerin hepsini birlikte sürükle).</p><p><code>public/index.html</code> is the landing page, not the app. Re-upload <b>index.html</b> from Pusula-site-github.zip into <code>public</code>, keeping its folders.</p>';
 function serveStatic(req, res, pathname) {
   if (req.method !== "GET" && req.method !== "HEAD") return res.json({ error: "not_found" }, 404);
   { const pm = /^\/p\/([\w-]{3,40})\/?$/.exec(pathname); if (pm) return postPage(req, res, pm[1]); }
@@ -3193,12 +3209,13 @@ function serveStatic(req, res, pathname) {
   if (!INDEX) { res.statusCode = 200; res.setHeader("Content-Type", "text/plain; charset=utf-8"); return res.end("Pusula sunucusu çalışıyor. Uygulama dosyaları için public/index.html ekleyin."); }
   let p;
   try { p = decodeURIComponent(pathname); } catch (e) { return res.json({ error: "bad_request" }, 400); }
+  if ((p === "/" || p === "/index.html") && !appOk()) { res.statusCode = 200; res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(WRONG_INDEX); }
   if (p === "/" || p === "/index.html") { res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(req.method === "HEAD" ? undefined : INDEX); }
   const lm = /^\/(en|de|es|fr|pt|ru|ar|az|id|ja)\/?$/.exec(p); // dile özel tanıtım sayfaları (arama motorları için)
   if (lm) { const lf = path.join(PUB, lm[1], "index.html"); if (fs.existsSync(lf)) { res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "public, max-age=3600"); return res.end(req.method === "HEAD" ? undefined : fs.readFileSync(lf)); } }
   const f = path.normalize(path.join(PUB, p));
   if (!f.startsWith(PUB + path.sep) || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
-    res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(INDEX); // SPA
+    res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache"); return res.end(appOk() ? INDEX : WRONG_INDEX); // SPA
   }
   if (LEGAL_PAGES.has(path.basename(f))) {
     res.setHeader("Content-Type", MIME[".html"]); res.setHeader("Cache-Control", "no-cache");
@@ -3827,6 +3844,223 @@ S("receipts_set", needProf, (req, res) => {
   res.json({ ok: true, receipts: receiptsOn(me) });
 });
 // ===== END PACK78 =====
+// ===== BEGIN PACK79 =====
+// Paket 79: yıldızlı mesajlar (yalnızca kimlik numarası saklanır; mesaj içeriği uçtan uca şifreli kalır)
+const STAR_MAX = 500;
+const starAccess = (me, kind, id) => {
+  if (kind === "g") { const g = db.prepare("SELECT group_id FROM gmsgs WHERE id=?").get(id); return !!g && isMember(g.group_id, me); }
+  const m = db.prepare("SELECT from_id, to_id FROM msgs WHERE id=?").get(id);
+  return !!m && (m.from_id === me || m.to_id === me) && !blockedEither(me, m.from_id === me ? m.to_id : m.from_id);
+};
+S("star_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, id = Math.floor(+b.id || 0), kind = b.kind === "g" ? "g" : "d", on = b.on !== false;
+  if (!limit("sstar:" + me, 300, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!(id > 0)) return res.status(400).json({ error: "bad_id" });
+  if (!starAccess(me, kind, id)) return res.status(404).json({ error: "not_found" });
+  if (on) {
+    const has = db.prepare("SELECT 1 FROM msg_stars WHERE user_id=? AND kind=? AND msg_id=?").get(me, kind, id);
+    if (!has && db.prepare("SELECT COUNT(*) c FROM msg_stars WHERE user_id=?").get(me).c >= STAR_MAX) return res.status(400).json({ error: "star_limit" });
+    db.prepare("INSERT OR IGNORE INTO msg_stars(user_id,kind,msg_id,created) VALUES(?,?,?,?)").run(me, kind, id, now());
+  } else db.prepare("DELETE FROM msg_stars WHERE user_id=? AND kind=? AND msg_id=?").run(me, kind, id);
+  res.json({ ok: true, star: on });
+});
+S("star_list", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (!limit("sstl:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (b.kind === "g") {
+    const gid = String(b.id || "");
+    if (!db.prepare("SELECT 1 FROM chat_groups WHERE id=?").get(gid) || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+    const rows = db.prepare("SELECT x.id, x.from_id, x.text, x.media, x.created, f.handle FROM msg_stars s JOIN gmsgs x ON x.id=s.msg_id AND x.group_id=? JOIN profiles f ON f.user_id=x.from_id WHERE s.user_id=? AND s.kind='g' ORDER BY x.id DESC LIMIT 100").all(gid, me);
+    return res.json({ msgs: rows.map(r => ({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, star: true })) });
+  }
+  const p = profByHandle(b.handle);
+  if (!p || blockedEither(me, p.user_id)) return res.status(404).json({ error: "not_found" });
+  const rows = db.prepare("SELECT m.id, m.from_id, m.text, m.media, m.created FROM msg_stars s JOIN msgs m ON m.id=s.msg_id WHERE s.user_id=? AND s.kind='d' AND ((m.from_id=? AND m.to_id=?) OR (m.from_id=? AND m.to_id=?)) ORDER BY m.id DESC LIMIT 100").all(me, me, p.user_id, p.user_id, me);
+  res.json({ msgs: rows.map(r => ({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, star: true })) });
+});
+// ===== END PACK79 =====
+// ===== BEGIN PACK80 =====
+// Paket 80: profil vurgu rengi (yalnızca hazır renk anahtarları saklanır)
+const ACCENTS = ["blue", "green", "purple", "pink", "orange", "red", "teal", "gold"];
+db.exec(`CREATE TABLE IF NOT EXISTS profile_accent(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, color TEXT NOT NULL)`);
+function accentFor(uid) { const r = db.prepare("SELECT color FROM profile_accent WHERE user_id=?").get(uid); return r && ACCENTS.includes(r.color) ? r.color : ""; }
+S("accent_set", needProf, (req, res) => {
+  const me = req.user.id, c = (req.body || {}).color;
+  if (!limit("sacc:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (c === null || c === "" || c === undefined) { db.prepare("DELETE FROM profile_accent WHERE user_id=?").run(me); return res.json({ ok: true, accent: "" }); }
+  if (typeof c !== "string" || !ACCENTS.includes(c)) return res.status(400).json({ error: "bad_color" });
+  db.prepare("INSERT INTO profile_accent(user_id,color) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET color=excluded.color").run(me, c);
+  res.json({ ok: true, accent: c });
+});
+// ===== END PACK80 =====
+// ===== BEGIN PACK82 =====
+// Paket 82: son görülme (karşılıklı: iki taraf da açıksa görünür; oturum etkinliğinden hesaplanır)
+db.exec(`CREATE TABLE IF NOT EXISTS lastseen_off(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE)`);
+function lastSeenOn(uid) { return !db.prepare("SELECT 1 FROM lastseen_off WHERE user_id=?").get(uid); }
+function lastSeenFor(me, other) {
+  if (!lastSeenOn(me) || !lastSeenOn(other) || isBanned(other) || blockedEither(me, other)) return 0;
+  const r = db.prepare("SELECT MAX(CASE WHEN last>created THEN last ELSE created END) m FROM sessions WHERE user_id=? AND expires>?").get(other, now());
+  return (r && r.m) || 0;
+}
+S("lastseen_set", needProf, (req, res) => {
+  const me = req.user.id, on = (req.body || {}).on !== false;
+  if (!limit("sls:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (on) db.prepare("DELETE FROM lastseen_off WHERE user_id=?").run(me);
+  else db.prepare("INSERT OR IGNORE INTO lastseen_off(user_id) VALUES(?)").run(me);
+  res.json({ ok: true, lastSeen: lastSeenOn(me) });
+});
+// ===== END PACK82 =====
+// ===== BEGIN PACK83 =====
+// Paket 83: kaybolan mesajlar (sohbet başına süre) ve randevu/rezervasyon sistemi
+try { db.exec("ALTER TABLE msgs ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* sütun zaten var */ }
+try { db.exec("ALTER TABLE gmsgs ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* sütun zaten var */ }
+db.exec(`CREATE TABLE IF NOT EXISTS chat_ttl(ckey TEXT PRIMARY KEY, ttl INTEGER NOT NULL, by_id TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS msgs_exp ON msgs(exp) WHERE exp>0;
+CREATE INDEX IF NOT EXISTS gmsgs_exp ON gmsgs(exp) WHERE exp>0;
+CREATE TRIGGER IF NOT EXISTS msgs_ttl AFTER INSERT ON msgs
+BEGIN
+  UPDATE msgs SET exp = NEW.created + 1000 * (SELECT t.ttl FROM chat_ttl t WHERE t.ckey = 'd:' || CASE WHEN NEW.from_id < NEW.to_id THEN NEW.from_id || ':' || NEW.to_id ELSE NEW.to_id || ':' || NEW.from_id END)
+  WHERE id = NEW.id AND EXISTS (SELECT 1 FROM chat_ttl t WHERE t.ckey = 'd:' || CASE WHEN NEW.from_id < NEW.to_id THEN NEW.from_id || ':' || NEW.to_id ELSE NEW.to_id || ':' || NEW.from_id END);
+END;
+CREATE TRIGGER IF NOT EXISTS gmsgs_ttl AFTER INSERT ON gmsgs
+BEGIN
+  UPDATE gmsgs SET exp = NEW.created + 1000 * (SELECT t.ttl FROM chat_ttl t WHERE t.ckey = 'g:' || NEW.group_id)
+  WHERE id = NEW.id AND EXISTS (SELECT 1 FROM chat_ttl t WHERE t.ckey = 'g:' || NEW.group_id);
+END;`);
+const TTL_OK = [0, 3600, 86400, 604800, 2592000];
+const ttlD = (a, b) => "d:" + (a < b ? a + ":" + b : b + ":" + a), ttlG = gid => "g:" + gid;
+const ttlOf = ck => { const r = db.prepare("SELECT ttl FROM chat_ttl WHERE ckey=?").get(ck); return r ? r.ttl : 0; };
+function expireMsgs() {
+  const t = now();
+  for (const [tbl, kind] of [["msgs", "d"], ["gmsgs", "g"]]) {
+    for (const r of db.prepare(`SELECT id, media FROM ${tbl} WHERE exp>0 AND exp<=? LIMIT 500`).all(t)) {
+      db.prepare(`DELETE FROM ${tbl} WHERE id=?`).run(r.id);
+      db.prepare("DELETE FROM msg_stars WHERE kind=? AND msg_id=?").run(kind, r.id);
+      db.prepare("DELETE FROM reacts WHERE kind=? AND msg_id=?").run(kind, r.id);
+      if (r.media) r2Del(r.media);
+    }
+  }
+}
+setInterval(() => { try { expireMsgs(); } catch (e) { /* yoksay */ } }, 60e3).unref();
+S("ttl_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, ttl = Math.floor(+b.ttl || 0);
+  if (!TTL_OK.includes(ttl)) return res.status(400).json({ error: "bad_ttl" });
+  if (!limit("sttl:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  let key;
+  if (b.id) {
+    const gid = String(b.id), g = db.prepare("SELECT owner FROM chat_groups WHERE id=?").get(gid);
+    if (!g || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
+    if (g.owner !== me) return res.status(403).json({ error: "owner_only" });
+    key = ttlG(gid);
+  } else {
+    const p = profByHandle(b.handle);
+    if (!p || p.user_id === me || blockedEither(me, p.user_id) || isBanned(p.user_id)) return res.status(404).json({ error: "not_found" });
+    key = ttlD(me, p.user_id);
+  }
+  if (ttl === 0) db.prepare("DELETE FROM chat_ttl WHERE ckey=?").run(key);
+  else db.prepare("INSERT INTO chat_ttl(ckey,ttl,by_id,at) VALUES(?,?,?,?) ON CONFLICT(ckey) DO UPDATE SET ttl=excluded.ttl, by_id=excluded.by_id, at=excluded.at").run(key, ttl, me, now());
+  res.json({ ok: true, ttl });
+});
+
+// --- Randevu / rezervasyon ---
+db.exec(`CREATE TABLE IF NOT EXISTS rv_cfg(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, enabled INTEGER NOT NULL DEFAULT 0, slot INTEGER NOT NULL DEFAULT 30, lead INTEGER NOT NULL DEFAULT 2, days INTEGER NOT NULL DEFAULT 14, auto INTEGER NOT NULL DEFAULT 0, tz INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', hours TEXT NOT NULL DEFAULT '{}', svcs TEXT NOT NULL DEFAULT '[]', updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rv_books(id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, cust TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, svc TEXT NOT NULL DEFAULT '', day TEXT NOT NULL, start TEXT NOT NULL, dur INTEGER NOT NULL, st TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, updated INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS rv_books_o ON rv_books(owner, day);
+CREATE INDEX IF NOT EXISTS rv_books_c ON rv_books(cust, day);`);
+const RV_SLOTS = [15, 20, 30, 45, 60, 90, 120];
+const RV_DEFAULT = { enabled: false, slot: 30, lead: 2, days: 14, auto: false, tz: 0, note: "", hours: { 1: [["09:00", "17:00"]], 2: [["09:00", "17:00"]], 3: [["09:00", "17:00"]], 4: [["09:00", "17:00"]], 5: [["09:00", "17:00"]] }, svcs: [] };
+const rvMin = s => { const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(s || "")); return m ? +m[1] * 60 + +m[2] : null; };
+const rvHm = n => String(Math.floor(n / 60)).padStart(2, "0") + ":" + String(n % 60).padStart(2, "0");
+const rvDayOk = d => { if (!/^\d{4}-\d{2}-\d{2}$/.test(String(d || ""))) return false; const t = new Date(d + "T00:00:00Z"); return !isNaN(t) && t.toISOString().slice(0, 10) === d; };
+function rvCfg(uid) {
+  const r = db.prepare("SELECT * FROM rv_cfg WHERE user_id=?").get(uid); if (!r) return null;
+  let hours = {}, svcs = []; try { hours = JSON.parse(r.hours); } catch (e) { /* boş */ } try { svcs = JSON.parse(r.svcs); } catch (e) { /* boş */ }
+  return { enabled: !!r.enabled, slot: r.slot, lead: r.lead, days: r.days, auto: !!r.auto, tz: r.tz, note: r.note, hours, svcs };
+}
+const rvOn = uid => { const r = db.prepare("SELECT enabled FROM rv_cfg WHERE user_id=?").get(uid); return !!(r && r.enabled); };
+function rvClean(b) {
+  const slot = RV_SLOTS.includes(+b.slot) ? +b.slot : 30, lead = Math.max(0, Math.min(168, Math.floor(+b.lead) || 0)), days = Math.max(1, Math.min(60, Math.floor(+b.days) || 14)), tz = Math.max(-840, Math.min(840, Math.floor(+b.tz) || 0));
+  const hours = {}, H = b.hours && typeof b.hours === "object" ? b.hours : {};
+  for (let d = 0; d < 7; d++) {
+    const rs = [];
+    for (const r of (Array.isArray(H[d]) ? H[d] : []).slice(0, 3)) { if (!Array.isArray(r)) continue; const s = rvMin(r[0]), e = rvMin(r[1]); if (s == null || e == null || e <= s) continue; rs.push([s, e]); }
+    rs.sort((x, y) => x[0] - y[0]);
+    const mg = []; for (const r of rs) { if (mg.length && r[0] < mg[mg.length - 1][1]) mg[mg.length - 1][1] = Math.max(mg[mg.length - 1][1], r[1]); else mg.push(r.slice()); }
+    if (mg.length) hours[d] = mg.map(r => [rvHm(r[0]), rvHm(r[1])]);
+  }
+  const svcs = (Array.isArray(b.svcs) ? b.svcs : []).slice(0, 8).map(s => ({ n: cleanText(s && s.n, 40), min: Math.max(5, Math.min(480, Math.round((+(s && s.min) || 30) / 5) * 5)), price: cleanText(s && s.price, 16) })).filter(s => s.n);
+  return { enabled: !!b.enabled, slot, lead, days, auto: !!b.auto, tz, note: cleanText(b.note, 200), hours, svcs };
+}
+const rvDur = (cfg, svc) => svc ? Math.ceil(svc.min / cfg.slot) * cfg.slot : cfg.slot;
+function rvSlots(uid, cfg, day, dur) {
+  const rs = cfg.hours[new Date(day + "T00:00:00Z").getUTCDay()] || []; if (!rs.length) return [];
+  const loc = new Date(now() + cfg.tz * 60000), td = loc.toISOString().slice(0, 10), nowMin = loc.getUTCHours() * 60 + loc.getUTCMinutes();
+  const diff = Math.round((Date.parse(day + "T00:00:00Z") - Date.parse(td + "T00:00:00Z")) / 864e5);
+  if (diff < 0 || diff > cfg.days) return [];
+  const busy = db.prepare("SELECT start, dur FROM rv_books WHERE owner=? AND day=? AND st IN ('pending','ok')").all(uid, day).map(x => [rvMin(x.start), rvMin(x.start) + x.dur]), out = [];
+  for (const r of rs) for (let t = rvMin(r[0]), e = rvMin(r[1]); t + dur <= e; t += cfg.slot) {
+    if (diff * 1440 + t - nowMin < cfg.lead * 60) continue;
+    if (busy.some(([bs, be]) => t < be && t + dur > bs)) continue;
+    out.push(rvHm(t));
+  }
+  return out;
+}
+S("rv_cfg", needProf, (req, res) => res.json({ cfg: rvCfg(req.user.id) || RV_DEFAULT, pending: db.prepare("SELECT COUNT(*) n FROM rv_books WHERE owner=? AND st='pending'").get(req.user.id).n }));
+S("rv_set", needProf, (req, res) => {
+  const me = req.user.id;
+  if (!limit("rvset:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const c = rvClean(req.body || {});
+  if (c.enabled && !Object.keys(c.hours).length) return res.status(400).json({ error: "no_hours" });
+  db.prepare("INSERT INTO rv_cfg(user_id,enabled,slot,lead,days,auto,tz,note,hours,svcs,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled, slot=excluded.slot, lead=excluded.lead, days=excluded.days, auto=excluded.auto, tz=excluded.tz, note=excluded.note, hours=excluded.hours, svcs=excluded.svcs, updated=excluded.updated")
+    .run(me, c.enabled ? 1 : 0, c.slot, c.lead, c.days, c.auto ? 1 : 0, c.tz, c.note, JSON.stringify(c.hours), JSON.stringify(c.svcs), now());
+  res.json({ ok: true, cfg: rvCfg(me) });
+});
+S("rv_get", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle);
+  if (!p || blockedEither(me, p.user_id) || isBanned(p.user_id)) return res.status(404).json({ error: "not_found" });
+  const cfg = rvCfg(p.user_id); if (!cfg || !cfg.enabled) return res.status(404).json({ error: "not_found" });
+  const svc = cfg.svcs.length ? cfg.svcs[+b.svc || 0] : null, dur = rvDur(cfg, svc || null);
+  const loc = new Date(now() + cfg.tz * 60000), free = [];
+  for (let i = 0; i <= Math.min(cfg.days, 21); i++) { const d = new Date(Date.UTC(loc.getUTCFullYear(), loc.getUTCMonth(), loc.getUTCDate() + i)).toISOString().slice(0, 10), n = rvSlots(p.user_id, cfg, d, dur).length; if (n) free.push({ day: d, n }); }
+  const day = String(b.day || ""), slots = rvDayOk(day) ? rvSlots(p.user_id, cfg, day, dur) : [];
+  res.json({ handle: p.handle, tz: cfg.tz, note: cfg.note, auto: cfg.auto, slot: cfg.slot, svcs: cfg.svcs.map((s, i) => ({ id: String(i), n: s.n, min: s.min, price: s.price })), free, slots, dur });
+});
+S("rv_new", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle);
+  if (!p || p.user_id === me || blockedEither(me, p.user_id) || isBanned(p.user_id)) return res.status(404).json({ error: "not_found" });
+  const cfg = rvCfg(p.user_id); if (!cfg || !cfg.enabled) return res.status(404).json({ error: "not_found" });
+  if (!limit("rvnew:" + me, 20, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const svc = cfg.svcs.length ? cfg.svcs[+b.svc || 0] : null; if (cfg.svcs.length && !svc) return res.status(400).json({ error: "bad_service" });
+  const day = String(b.day || ""), start = String(b.start || ""); if (!rvDayOk(day) || rvMin(start) == null) return res.status(400).json({ error: "bad_time" });
+  const dur = rvDur(cfg, svc);
+  if (!rvSlots(p.user_id, cfg, day, dur).includes(start)) return res.status(409).json({ error: "slot_taken" });
+  const since = new Date(now() - 864e5).toISOString().slice(0, 10);
+  if (db.prepare("SELECT COUNT(*) n FROM rv_books WHERE cust=? AND owner=? AND st IN ('pending','ok') AND day>=?").get(me, p.user_id, since).n >= 3 || db.prepare("SELECT COUNT(*) n FROM rv_books WHERE cust=? AND st IN ('pending','ok') AND day>=?").get(me, since).n >= 10) return res.status(409).json({ error: "too_many" });
+  const id = "r" + rnd(8), t = now(), st = cfg.auto ? "ok" : "pending";
+  db.prepare("INSERT INTO rv_books(id,owner,cust,svc,day,start,dur,st,note,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id, p.user_id, me, svc ? svc.n : "", day, start, dur, st, cleanText(b.note, 200), t, t);
+  notify(p.user_id, me, "rv", id, day + " " + start + (svc ? " · " + svc.n : ""));
+  res.json({ ok: true, id, status: st });
+});
+S("rv_list", needProf, (req, res) => {
+  const me = req.user.id, own = (req.body || {}).role === "own", since = new Date(now() - 7 * 864e5).toISOString().slice(0, 10);
+  const rows = db.prepare(`SELECT * FROM rv_books WHERE ${own ? "owner" : "cust"}=? AND day>=? ORDER BY day, start LIMIT 100`).all(me, since);
+  const books = [], tzs = {};
+  for (const r of rows) { const o = profOf(own ? r.cust : r.owner); if (!o) continue; if (!own && !(r.owner in tzs)) tzs[r.owner] = (rvCfg(r.owner) || {}).tz || 0; books.push({ id: r.id, day: r.day, start: r.start, dur: r.dur, svc: r.svc, st: r.st, note: r.note, handle: o.handle, avatar: mediaUrl(o.avatar), tz: own ? undefined : tzs[r.owner] }); }
+  res.json({ books, pending: db.prepare("SELECT COUNT(*) n FROM rv_books WHERE owner=? AND st='pending'").get(me).n });
+});
+S("rv_act", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, r = db.prepare("SELECT * FROM rv_books WHERE id=? AND (owner=? OR cust=?)").get(String(b.id || ""), me, me);
+  if (!r) return res.status(404).json({ error: "not_found" });
+  const own = r.owner === me, act = String(b.act || ""); let st = "";
+  if (own && act === "ok" && r.st === "pending") st = "ok";
+  else if (own && act === "no" && r.st === "pending") st = "no";
+  else if (act === "cancel" && (r.st === "pending" || r.st === "ok")) st = "cancel";
+  else return res.status(409).json({ error: "bad_state" });
+  db.prepare("UPDATE rv_books SET st=?, updated=? WHERE id=?").run(st, now(), r.id);
+  notify(own ? r.cust : r.owner, me, st === "ok" ? "rv_ok" : st === "no" ? "rv_no" : "rv_cancel", r.id, r.day + " " + r.start);
+  res.json({ ok: true, status: st });
+});
+// ===== END PACK83 =====
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);
