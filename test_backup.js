@@ -36,7 +36,7 @@ gh.listen(0, async () => {
     const g = await call(3122, "GET", "/api/data", null, l.token); ok(g.data && g.data.tasks[0] === "önemli görev", "veri korunmuş");
     B.kill("SIGTERM"); await sleep(500);
     const before = stored, putsBefore = puts;
-    const C = start(3123, d3, "yanlis-anahtar"); await waitUp(3123);
+    const C = start(3123, d3, "yanlis-anahtar"); await waitUp(3123); await sleep(800);
     ok(/GERİ YÜKLENEMEDİ/.test(C.out), "yanlış anahtarda uyarı");
     ok(/^HATA/.test((await call(3123, "GET", "/api/health")).backup), "health hatayı gösteriyor");
     await call(3123, "POST", "/api/register", { email: "yeni@x.co", password: "parola-123", name: "Y" });
