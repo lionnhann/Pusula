@@ -9,8 +9,8 @@ server.listen(0, async () => {
   const call = async (p, b, tok, method) => { const r = await fetch(base + p, { method: method || "POST", headers: Object.assign({ "Content-Type": "application/json" }, tok ? { Authorization: "Bearer " + tok } : {}), body: method === "GET" ? undefined : JSON.stringify(b || {}) }); const j = await r.json().catch(() => ({})); j.s = r.status; return j; };
   try {
     const h = await fetch(base + "/api/health"); 
-    ok(h.headers.get("x-frame-options") === "DENY", "x-frame-options");
-    ok(/frame-ancestors 'none'/.test(h.headers.get("content-security-policy") || ""), "csp frame-ancestors");
+    ok(h.headers.get("x-frame-options") === "SAMEORIGIN", "x-frame-options");
+    ok(/frame-ancestors 'self'/.test(h.headers.get("content-security-policy") || ""), "csp frame-ancestors");
     ok(/microphone=\(self\)/.test(h.headers.get("permissions-policy") || ""), "permissions-policy");
     ok(h.headers.get("x-content-type-options") === "nosniff", "nosniff kept");
     ok(!h.headers.get("strict-transport-security"), "no HSTS on plain http without proto");

@@ -207,8 +207,8 @@ const server = http.createServer(async (req, res) => {
   }
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Content-Security-Policy", "frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'");
   res.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(self), payment=(), usb=(), interest-cohort=()");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
   if (req.headers["x-forwarded-proto"] === "https" || req.socket.encrypted) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
