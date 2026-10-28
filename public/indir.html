@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pusula'yı bilgisayarına indir</title>
+<meta name="description" content="Pusula kişisel iş asistanı: Windows, Mac ve Linux için ücretsiz indir.">
+<style>
+:root{--bg:#070c15;--card:#111a2b;--tx:#eaf1ff;--mu:#93a4c3;--ac:#5aa0ff;--bd:#22304a}
+@media (prefers-color-scheme:light){:root{--bg:#f3f6fc;--card:#fff;--tx:#10203a;--mu:#5a6b88;--ac:#1f62d6;--bd:#d6deec}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:28px;margin:0 0 6px}p{color:var(--mu);margin:6px 0}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:18px;margin:16px 0}
+.big{display:block;text-align:center;background:var(--ac);color:#fff;text-decoration:none;font-weight:700;font-size:18px;padding:16px;border-radius:14px;margin:12px 0 4px}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:10px}
+.row a{display:block;border:1px solid var(--bd);border-radius:12px;padding:12px;color:var(--tx);text-decoration:none;background:transparent}
+.row a small{display:block;color:var(--mu)}h2{font-size:18px;margin:0 0 6px}ol{padding-left:20px;margin:6px 0}li{margin:4px 0;color:var(--mu)}
+.lang{float:right}.lang button{background:none;border:1px solid var(--bd);color:var(--tx);border-radius:8px;padding:4px 10px;cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+<div class="lang"><button id="lg">English</button></div>
+<h1 data-t="h1">Pusula'yı bilgisayarına indir</h1>
+<p data-t="sub">Windows, Mac ve Linux için ücretsiz. Kurulunca Windows tarzı Pusula Masaüstü açılır; telefondaki hesabınla giriş yaparsan her şey eşitlenir.</p>
+
+<div class="card">
+  <h2 data-t="rec">Senin bilgisayarın için</h2>
+  <a class="big" id="main" href="#">…</a>
+  <p id="mainnote"></p>
+</div>
+
+<div class="card">
+  <h2 data-t="all">Tüm indirmeler</h2>
+  <div class="row">
+    <a data-f="Pusula-Windows-Kurulum.exe"><b>Windows</b><small data-t="winSetup">Kurulum (önerilen)</small></a>
+    <a data-f="Pusula-Windows-Tasinabilir.exe"><b>Windows</b><small data-t="winPortable">Kurulumsuz, taşınabilir</small></a>
+    <a data-f="Pusula-Mac-arm64.dmg"><b>Mac</b><small data-t="macArm">Apple Silicon (M1, M2, M3…)</small></a>
+    <a data-f="Pusula-Mac-x64.dmg"><b>Mac</b><small data-t="macIntel">Intel işlemci</small></a>
+    <a data-f="Pusula-Linux.AppImage"><b>Linux</b><small>AppImage</small></a>
+    <a data-f="Pusula-Linux.deb"><b>Linux</b><small>.deb (Ubuntu, Debian)</small></a>
+  </div>
+</div>
+
+<div class="card">
+  <h2 data-t="warnT">Kurarken karşına çıkabilir</h2>
+  <p data-t="warn">Uygulama henüz imzalı değil. Windows "Bilinmeyen yayıncı" (SmartScreen) uyarısı verirse "Ek bilgi" → "Yine de çalıştır" de. Mac'te dosyaya sağ tıklayıp "Aç" de.</p>
+</div>
+
+<div class="card">
+  <h2 data-t="pwaT">İndirmeden de kurabilirsin</h2>
+  <ol>
+    <li data-t="pwa1">Pusula'yı Chrome veya Edge ile aç.</li>
+    <li data-t="pwa2">Adres çubuğunun sağındaki "Yükle" simgesine bas.</li>
+    <li data-t="pwa3">Pusula içinde yan menüden "Masaüstü modu"nu aç.</li>
+  </ol>
+  <p><a href="/" style="color:var(--ac)" data-t="open">Pusula'yı aç</a></p>
+</div>
+</main>
+<script>
+(function(){
+var BASE="https://github.com/lionnhann/Pusula/releases/download/pusula-pc/";
+var T={tr:{h1:"Pusula'yı bilgisayarına indir",sub:"Windows, Mac ve Linux için ücretsiz. Kurulunca Windows tarzı Pusula Masaüstü açılır; telefondaki hesabınla giriş yaparsan her şey eşitlenir.",rec:"Senin bilgisayarın için",all:"Tüm indirmeler",winSetup:"Kurulum (önerilen)",winPortable:"Kurulumsuz, taşınabilir",macArm:"Apple Silicon (M1, M2, M3…)",macIntel:"Intel işlemci",warnT:"Kurarken karşına çıkabilir",warn:"Uygulama henüz imzalı değil. Windows \"Bilinmeyen yayıncı\" (SmartScreen) uyarısı verirse \"Ek bilgi\" → \"Yine de çalıştır\" de. Mac'te dosyaya sağ tıklayıp \"Aç\" de.",pwaT:"İndirmeden de kurabilirsin",pwa1:"Pusula'yı Chrome veya Edge ile aç.",pwa2:"Adres çubuğunun sağındaki \"Yükle\" simgesine bas.",pwa3:"Pusula içinde yan menüden \"Masaüstü modu\"nu aç.",open:"Pusula'yı aç",dl:"İndir: ",unk:"İşletim sistemin otomatik anlaşılamadı; aşağıdan seç.",mobile:"Bu sayfa bilgisayar içindir. Telefonda Pusula'yı Google Play'den kur.",lg:"English"},
+en:{h1:"Download Pusula for your computer",sub:"Free for Windows, Mac and Linux. After installing, the Windows-style Pusula Desktop opens; sign in with your phone account and everything syncs.",rec:"For your computer",all:"All downloads",winSetup:"Installer (recommended)",winPortable:"Portable, no install",macArm:"Apple Silicon (M1, M2, M3…)",macIntel:"Intel processor",warnT:"You may see a warning",warn:"The app is not signed yet. If Windows shows an \"Unknown publisher\" (SmartScreen) warning, choose \"More info\" → \"Run anyway\". On Mac, right-click the file and choose \"Open\".",pwaT:"Or install without downloading",pwa1:"Open Pusula in Chrome or Edge.",pwa2:"Click the \"Install\" icon at the right of the address bar.",pwa3:"Inside Pusula, open \"Desktop mode\" from the side menu.",open:"Open Pusula",dl:"Download: ",unk:"We could not detect your system; pick one below.",mobile:"This page is for computers. On your phone, install Pusula from Google Play.",lg:"Türkçe"}};
+var lang=(localStorage.getItem("pusula_dl_lang")||(navigator.language||"tr").slice(0,2));if(!T[lang])lang="en";
+var ua=navigator.userAgent||"",pl=(navigator.platform||"");
+var os=/Android|iPhone|iPad|iPod/i.test(ua)?"mobile":/Win/i.test(pl+ua)?"win":/Mac/i.test(pl+ua)?"mac":/Linux|X11/i.test(pl+ua)?"linux":"unk";
+function render(){
+  var t=T[lang];document.documentElement.lang=lang;
+  document.querySelectorAll("[data-t]").forEach(function(e){var k=e.getAttribute("data-t");if(t[k])e.textContent=t[k]});
+  document.getElementById("lg").textContent=t.lg;
+  document.querySelectorAll("[data-f]").forEach(function(a){a.href=BASE+a.getAttribute("data-f")});
+  var m=document.getElementById("main"),n=document.getElementById("mainnote"),f="",lab="";
+  if(os==="win"){f="Pusula-Windows-Kurulum.exe";lab="Windows"}
+  else if(os==="mac"){f="Pusula-Mac-arm64.dmg";lab="Mac (Apple Silicon)";n.textContent=lang==="tr"?"Intel işlemcili Mac'in varsa aşağıdan Intel sürümünü seç.":"If your Mac has an Intel processor, pick the Intel version below."}
+  else if(os==="linux"){f="Pusula-Linux.AppImage";lab="Linux"}
+  if(f){m.href=BASE+f;m.textContent=t.dl+lab}
+  else{m.removeAttribute("href");m.style.display="none";n.textContent=os==="mobile"?t.mobile:t.unk}
+}
+document.getElementById("lg").onclick=function(){lang=lang==="tr"?"en":"tr";try{localStorage.setItem("pusula_dl_lang",lang)}catch(e){}render()};
+render();
+})();
+</script>
+</body>
+</html>
