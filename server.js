@@ -112,7 +112,12 @@ function smtpSend(url, to, subject, text) {
     });
   });
 }
+let LAST_MAIL = { ok: null, at: 0, err: "" };
 async function sendMail(to, subject, text) {
+  try { await sendMailRaw(to, subject, text); LAST_MAIL = { ok: HAS_MAIL, at: Date.now(), err: "" }; }
+  catch (e) { LAST_MAIL = { ok: false, at: Date.now(), err: String(e.message || e).slice(0, 200) }; console.error("posta HATASI:", LAST_MAIL.err, "(gönderen: " + MAIL_FROM + ")"); throw e; }
+}
+async function sendMailRaw(to, subject, text) {
   if (process.env.BREVO_API_KEY) { // Brevo (ücretsiz: günde 300 e-posta, alan adı gerekmez; gönderen adresi Brevo'da doğrulanmalı)
     const m = MAIL_FROM.match(/^\s*(.*?)\s*<([^>]+)>\s*$/), sender = m ? { name: m[1].replace(/^"|"$/g, "") || "Pusula", email: m[2] } : { name: "Pusula", email: MAIL_FROM.trim() };
     const r = await fetch(process.env.BREVO_API_URL || "https://api.brevo.com/v3/smtp/email", { method: "POST", headers: { "api-key": process.env.BREVO_API_KEY, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ sender, to: [{ email: to }], subject, textContent: text }) });
@@ -267,7 +272,7 @@ function auth(req, res, next) {
 }
 const wrap = f => f;
 
-app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, verify: REQUIRE_VERIFY, billing: BILLING, play: PLAY_DIAG, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus, app: appOk(), lang: fs.existsSync(path.join(PUB, "lang")) }));
+app.get("/api/health", (req, res) => res.json({ ok: true, mail: HAS_MAIL, mailOk: LAST_MAIL.ok, mailErr: LAST_MAIL.err, verify: REQUIRE_VERIFY, billing: BILLING, play: PLAY_DIAG, ai: !!AI_KEY, social: typeof R2_ON !== "undefined" && R2_ON, google: typeof G_ON !== "undefined" && G_ON, e2e: true, backup: bkStatus, app: appOk(), lang: fs.existsSync(path.join(PUB, "lang")) }));
 
 app.post("/api/register", wrap(async (req, res) => {
   if (!limit("reg:" + req.ip, 10, 3600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -315,6 +320,16 @@ app.post("/api/resend", wrap(async (req, res) => {
   const u = okEmail(email) ? db.prepare("SELECT * FROM users WHERE email=? AND verified=0").get(email) : null;
   if (u) sendVerify(u, mailLang(req)).catch(() => {});
   res.json({ ok: true });
+}));
+
+app.get("/api/admin/mailtest", wrap(async (req, res) => {
+  if (!ADMIN_TOKEN) return res.status(404).json({ error: "not_found" });
+  if (!safeEq(sha(String(req.headers["x-admin-token"] || "")), sha(ADMIN_TOKEN))) return res.status(401).json({ error: "unauthorized" });
+  const to = String(new URL(req.url, "http://x").searchParams.get("to") || "").trim().toLowerCase();
+  if (!okEmail(to)) return res.status(400).json({ error: "bad_email" });
+  if (!HAS_MAIL) return res.json({ ok: false, error: "Posta ayarlı değil: Render'a BREVO_API_KEY (veya RESEND_API_KEY / SMTP_URL) ve MAIL_FROM ekle." });
+  try { await sendMail(to, "Pusula test", "Bu bir test e-postasıdır. Bunu görüyorsan posta ayarın çalışıyor."); res.json({ ok: true, from: MAIL_FROM }); }
+  catch (e) { res.json({ ok: false, from: MAIL_FROM, error: String(e.message || e) }); }
 }));
 
 app.post("/api/forgot", wrap(async (req, res) => {
