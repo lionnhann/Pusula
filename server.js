@@ -589,7 +589,7 @@ const isFollowing = (me, uid) => !!db.prepare("SELECT 1 FROM follows WHERE follo
 const canSee = (me, uid) => uid === me || !isPrivate(uid) || isFollowing(me, uid);
 const blockedEither = (a, b) => !!db.prepare("SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)").get(a, b, b, a);
 const pubProf = p => p ? { handle: p.handle, bio: p.bio, avatar: mediaUrl(p.avatar), private: !!p.private, badge: !!p.badge, link: p.link || "" } : null;
-const FROZEN_WRITE = /^\/api\/social\/(post|comment|like|follow|story_new|send|gsend|gcreate|repost|live_start|l_new|c_create|c_join|sound_new|sched_new|ev_new|capsule_new|react|post_vote|collab_invite|story_react|comment_like|upload|post_edit|story_answer|seller_rate)$/;
+const FROZEN_WRITE = /^\/api\/social\/(post|comment|like|follow|story_new|send|gsend|gcreate|repost|live_start|l_new|c_create|c_join|sound_new|sched_new|ev_new|capsule_new|react|post_vote|collab_invite|story_react|comment_like|upload|post_edit|story_answer|seller_rate|call_start|rem_add|msg_edit|team_new|team_invite|team_task_add|team_note_set)$/;
 const socialMw = (req, res, next) => {
   if (isRealBan(req.user.id)) return res.status(403).json({ error: "banned" });
   if (FROZEN_WRITE.test(String(req.url || "").split("?")[0]) && isFrozen(req.user.id)) return res.status(403).json({ error: "frozen" });
@@ -834,11 +834,11 @@ S("thread", needProf, (req, res) => {
   if (!p || blockedEither(me, p.user_id)) return res.status(404).json({ error: "not_found" });
   const after = +(req.body || {}).after || 0;
   expireMsgs();
-  const rows = db.prepare("SELECT id, from_id, text, media, created, exp FROM msgs WHERE id>? AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) ORDER BY id DESC LIMIT 60").all(after, me, p.user_id, p.user_id, me).reverse();
+  const rows = db.prepare("SELECT id, from_id, text, media, created, exp, ed FROM msgs WHERE (id>? OR ed>?) AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) ORDER BY id DESC LIMIT 60").all(after, +(req.body || {}).eds || 9e15, me, p.user_id, p.user_id, me).reverse();
   db.prepare("UPDATE msgs SET read=1 WHERE from_id=? AND to_id=? AND read=0").run(p.user_id, me);
   const rm = reactMap("d", rows.map(r => r.id), me);
   const seen = receiptsOn(me) && receiptsOn(p.user_id) ? (db.prepare("SELECT MAX(id) m FROM msgs WHERE from_id=? AND to_id=? AND read=1").get(me, p.user_id).m || 0) : 0;
-  res.json({ ttl: ttlOf(ttlD(me, p.user_id)), lastSeen: lastSeenFor(me, p.user_id), seen, receipts: receiptsOn(me), msgs: rows.map(r => withRe({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, exp: r.exp || 0 }, rm)), handle: p.handle, avatar: mediaUrl(p.avatar), typing: typing("d:" + p.user_id + ":" + me) });
+  res.json({ now: now(), ttl: ttlOf(ttlD(me, p.user_id)), lastSeen: lastSeenFor(me, p.user_id), seen, receipts: receiptsOn(me), msgs: rows.map(r => withRe({ id: r.id, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, exp: r.exp || 0, ed: r.ed || 0 }, rm)), handle: p.handle, avatar: mediaUrl(p.avatar), typing: typing("d:" + p.user_id + ":" + me) });
 });
 S("send", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, p = profByHandle(b.handle), text = String(b.text || ""), media = String(b.media || "");
@@ -852,6 +852,7 @@ S("send", needProf, (req, res) => {
   if (!pk) return res.status(409).json({ error: "peer_no_key" });
   if (em[1] !== mk.fp || em[2] !== pk.fp) return res.status(409).json({ error: "key_changed" });
   const r = db.prepare("INSERT INTO msgs(from_id,to_id,text,media,created) VALUES(?,?,?,?,?)").run(me, p.user_id, text, media, now());
+  pushTo(p.user_id, "msg", { h: handleOfUid(me), from: me });
   res.json({ ok: true, id: Number(r.lastInsertRowid) });
 });
 
@@ -958,6 +959,7 @@ function notify(to, actor, type, postId, text, once) {
   if (postId && db.prepare("SELECT 1 FROM post_mute WHERE post_id=? AND user_id=?").get(postId, to)) return; // gönderi sessize alınmış
   if (once && db.prepare("SELECT 1 FROM notifs WHERE user_id=? AND actor=? AND type=? AND post_id=?").get(to, actor, type, postId || "")) return;
   db.prepare("INSERT INTO notifs(user_id,actor,type,post_id,text,created) VALUES(?,?,?,?,?,?)").run(to, actor, type, postId || "", cleanText(String(text || "").replace(/\[\[rp:[^\]]*\]\]/g, ""), 80).replace(/\n/g, " "), now());
+  pushTo(to, "notif", { from: actor });
 }
 function mentionNotify(text, actor, postId) {
   const seen = new Set();
@@ -1104,6 +1106,202 @@ S("chats", needProf, (req, res) => {
   const me = req.user.id, all = chatPrefsApply(me, dmChats(me).concat(groupChats(me))).sort((a, b) => (b.pin ? 1 : 0) - (a.pin ? 1 : 0) || b.created - a.created);
   res.json({ chats: all, unread: all.reduce((n, c) => n + (c.mute ? 0 : c.unread), 0) });
 });
+
+
+// Paket 148: ekip çalışma alanı (ortak görevler, not ve etkinlik; veriler sunucuda, yalnızca ekip üyelerine açık)
+db.exec(`
+CREATE TABLE IF NOT EXISTS teams(id TEXT PRIMARY KEY, name TEXT NOT NULL, owner TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created INTEGER NOT NULL, rev INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS team_members(team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, status TEXT NOT NULL, invited_by TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, PRIMARY KEY(team_id,user_id));
+CREATE TABLE IF NOT EXISTS team_tasks(id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE, text TEXT NOT NULL, due TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0, assignee TEXT NOT NULL DEFAULT '', created_by TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS team_notes(team_id TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE, text TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL DEFAULT 0, by_id TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS team_log(id INTEGER PRIMARY KEY AUTOINCREMENT, team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE, user_id TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS team_tasks_t ON team_tasks(team_id);
+CREATE INDEX IF NOT EXISTS team_log_t ON team_log(team_id, id);
+`);
+const TM_MAX_MEMBERS = 20, TM_MAX_TASKS = 500, TM_MAX_OWN = 5;
+const tmDateOk = d => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(new Date(d + "T12:00:00")) && new Date(d + "T12:00:00").toISOString().slice(0, 10) === d;
+const tmHandle = uid => (db.prepare("SELECT handle FROM profiles WHERE user_id=?").get(uid) || {}).handle || "";
+const tmRow = (tid, uid) => db.prepare("SELECT t.id, t.name, t.owner, t.rev, m.status FROM teams t JOIN team_members m ON m.team_id=t.id WHERE t.id=? AND m.user_id=?").get(String(tid || ""), uid);
+const tmActive = (tid, uid) => { const r = tmRow(tid, uid); return r && r.status === "active" ? r : null; };
+function tmBump(tid, uid, kind, text) {
+  db.prepare("UPDATE teams SET rev=rev+1 WHERE id=?").run(tid);
+  if (kind) {
+    db.prepare("INSERT INTO team_log(team_id,user_id,kind,text,created) VALUES(?,?,?,?,?)").run(tid, uid, kind, String(text || "").slice(0, 300), now());
+    db.prepare("DELETE FROM team_log WHERE team_id=? AND id NOT IN (SELECT id FROM team_log WHERE team_id=? ORDER BY id DESC LIMIT 100)").run(tid, tid);
+  }
+}
+S("team_list", needProf, (req, res) => {
+  const me = req.user.id;
+  const rows = db.prepare("SELECT t.id, t.name, t.owner, m.status, m.invited_by FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.user_id=? ORDER BY t.created").all(me);
+  const teams = [], invites = [];
+  for (const r of rows) {
+    if (r.status === "active") {
+      teams.push({ id: r.id, name: r.name, owner: r.owner === me,
+        members: db.prepare("SELECT COUNT(*) n FROM team_members WHERE team_id=? AND status='active'").get(r.id).n,
+        open: db.prepare("SELECT COUNT(*) n FROM team_tasks WHERE team_id=? AND done=0").get(r.id).n,
+        mine: db.prepare("SELECT COUNT(*) n FROM team_tasks WHERE team_id=? AND done=0 AND assignee=?").get(r.id, me).n });
+    } else invites.push({ id: r.id, name: r.name, from: tmHandle(r.invited_by) });
+  }
+  res.json({ ok: true, teams, invites });
+});
+S("team_new", needProf, (req, res) => {
+  const me = req.user.id, name = cleanText((req.body || {}).name, 40).replace(/\n/g, " ");
+  if (!limit("stn:" + me, 10, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!name) return res.status(400).json({ error: "empty" });
+  if (wordBlocked(name)) return res.status(400).json({ error: "blocked_content" });
+  if (db.prepare("SELECT COUNT(*) n FROM teams WHERE owner=?").get(me).n >= TM_MAX_OWN) return res.status(409).json({ error: "team_limit" });
+  const id = "t" + rnd(8), t = now();
+  db.prepare("INSERT INTO teams(id,name,owner,created) VALUES(?,?,?,?)").run(id, name, me, t);
+  db.prepare("INSERT INTO team_members(team_id,user_id,status,created) VALUES(?,?,'active',?)").run(id, me, t);
+  db.prepare("INSERT INTO team_notes(team_id) VALUES(?)").run(id);
+  res.json({ ok: true, id });
+});
+S("team_invite", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm || tm.owner !== me) return res.status(404).json({ error: "not_found" });
+  if (!limit("sti:" + me, 30, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const p = profByHandle(String(b.handle || "").replace(/^@/, ""));
+  if (!p || p.user_id === me || blockedEither(me, p.user_id) || isBanned(p.user_id)) return res.status(404).json({ error: "user_not_found" });
+  const ex = db.prepare("SELECT status FROM team_members WHERE team_id=? AND user_id=?").get(tm.id, p.user_id);
+  if (ex && ex.status === "active") return res.status(409).json({ error: "already_member" });
+  if (ex) return res.json({ ok: true });
+  if (db.prepare("SELECT COUNT(*) n FROM team_members WHERE team_id=?").get(tm.id).n >= TM_MAX_MEMBERS) return res.status(409).json({ error: "team_full" });
+  db.prepare("INSERT INTO team_members(team_id,user_id,status,invited_by,created) VALUES(?,?,'invited',?,?)").run(tm.id, p.user_id, me, now());
+  tmBump(tm.id, me, "invite", p.handle);
+  res.json({ ok: true });
+});
+S("team_answer", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmRow(b.id, me);
+  if (!tm || tm.status !== "invited") return res.status(404).json({ error: "not_found" });
+  if (b.accept) { db.prepare("UPDATE team_members SET status='active' WHERE team_id=? AND user_id=?").run(tm.id, me); tmBump(tm.id, me, "join", ""); }
+  else db.prepare("DELETE FROM team_members WHERE team_id=? AND user_id=?").run(tm.id, me);
+  res.json({ ok: true });
+});
+function tmRemove(tid, uid) {
+  db.prepare("DELETE FROM team_members WHERE team_id=? AND user_id=?").run(tid, uid);
+  db.prepare("UPDATE team_tasks SET assignee='' WHERE team_id=? AND assignee=?").run(tid, uid);
+}
+S("team_leave", needProf, (req, res) => {
+  const me = req.user.id, tm = tmActive((req.body || {}).id, me);
+  if (!tm) return res.status(404).json({ error: "not_found" });
+  if (tm.owner === me) {
+    if (db.prepare("SELECT COUNT(*) n FROM team_members WHERE team_id=? AND status='active' AND user_id<>?").get(tm.id, me).n > 0) return res.status(409).json({ error: "owner_cannot_leave" });
+    db.prepare("DELETE FROM teams WHERE id=?").run(tm.id);
+    return res.json({ ok: true });
+  }
+  tmRemove(tm.id, me); tmBump(tm.id, me, "leave", "");
+  res.json({ ok: true });
+});
+S("team_kick", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm || tm.owner !== me) return res.status(404).json({ error: "not_found" });
+  const p = profByHandle(String(b.handle || "").replace(/^@/, ""));
+  if (!p || p.user_id === me || !db.prepare("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?").get(tm.id, p.user_id)) return res.status(404).json({ error: "user_not_found" });
+  tmRemove(tm.id, p.user_id); tmBump(tm.id, me, "kick", p.handle);
+  res.json({ ok: true });
+});
+S("team_delete", needProf, (req, res) => {
+  const me = req.user.id, tm = tmActive((req.body || {}).id, me);
+  if (!tm || tm.owner !== me) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM teams WHERE id=?").run(tm.id);
+  res.json({ ok: true });
+});
+S("team_get", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm) return res.status(404).json({ error: "not_found" });
+  if (b.rev && +b.rev === tm.rev) return res.json({ ok: true, same: true, rev: tm.rev });
+  const members = db.prepare("SELECT m.user_id, m.status, f.handle, f.avatar FROM team_members m LEFT JOIN profiles f ON f.user_id=m.user_id WHERE m.team_id=? ORDER BY m.created").all(tm.id)
+    .map(x => ({ handle: x.handle || "", avatar: mediaUrl(x.avatar), status: x.status, owner: x.user_id === tm.owner, me: x.user_id === me }));
+  const hm = new Map(db.prepare("SELECT m.user_id, f.handle FROM team_members m LEFT JOIN profiles f ON f.user_id=m.user_id WHERE m.team_id=?").all(tm.id).map(x => [x.user_id, x.handle || ""]));
+  const tasks = db.prepare("SELECT id, text, due, done, assignee, created_by, created FROM team_tasks WHERE team_id=? ORDER BY done, due='' , due, created LIMIT 500").all(tm.id)
+    .map(x => ({ id: x.id, text: x.text, due: x.due, done: !!x.done, assignee: x.assignee ? (hm.get(x.assignee) || "") : "", by: hm.get(x.created_by) || "", can: x.created_by === me || tm.owner === me }));
+  const nt = db.prepare("SELECT text, rev, by_id, updated FROM team_notes WHERE team_id=?").get(tm.id) || { text: "", rev: 0, by: "", updated: 0 };
+  const log = db.prepare("SELECT user_id, kind, text, created FROM team_log WHERE team_id=? ORDER BY id DESC LIMIT 40").all(tm.id).map(x => ({ handle: tmHandle(x.user_id), kind: x.kind, text: x.text, created: x.created }));
+  res.json({ ok: true, rev: tm.rev, id: tm.id, name: tm.name, owner: tm.owner === me, members, tasks, note: { text: nt.text, rev: nt.rev, by: nt.by_id ? tmHandle(nt.by_id) : "", updated: nt.updated }, log });
+});
+S("team_task_add", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm) return res.status(404).json({ error: "not_found" });
+  if (!limit("stt:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const text = cleanText(b.text, 200).replace(/\n/g, " ");
+  if (!text) return res.status(400).json({ error: "empty" });
+  if (wordBlocked(text)) return res.status(400).json({ error: "blocked_content" });
+  if (db.prepare("SELECT COUNT(*) n FROM team_tasks WHERE team_id=?").get(tm.id).n >= TM_MAX_TASKS) return res.status(409).json({ error: "task_limit" });
+  const due = tmDateOk(String(b.due || "")) ? String(b.due) : "";
+  let asg = ""; if (b.assignee) { const p = profByHandle(String(b.assignee).replace(/^@/, "")); if (p && tmActive(tm.id, p.user_id)) asg = p.user_id; }
+  const id = "k" + rnd(8), t = now();
+  db.prepare("INSERT INTO team_tasks(id,team_id,text,due,assignee,created_by,created,updated) VALUES(?,?,?,?,?,?,?,?)").run(id, tm.id, text, due, asg, me, t, t);
+  if (asg && asg !== me) pushTo(asg, "team", { from: tm.id });
+  tmBump(tm.id, me, "task_add", text);
+  res.json({ ok: true, id });
+});
+S("team_task_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm) return res.status(404).json({ error: "not_found" });
+  if (!limit("stt:" + me, 240, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const k = db.prepare("SELECT id, text, due, done, assignee FROM team_tasks WHERE id=? AND team_id=?").get(String(b.tid || ""), tm.id);
+  if (!k) return res.status(404).json({ error: "not_found" });
+  let kind = "", text = k.text;
+  if (typeof b.done === "boolean" && b.done !== !!k.done) { db.prepare("UPDATE team_tasks SET done=? WHERE id=?").run(b.done ? 1 : 0, k.id); kind = b.done ? "task_done" : "task_undo"; }
+  if (typeof b.due === "string") { const d = tmDateOk(b.due) ? b.due : ""; if (d !== k.due) { db.prepare("UPDATE team_tasks SET due=? WHERE id=?").run(d, k.id); if (!kind) kind = "task_due"; } }
+  if (typeof b.assignee === "string") {
+    let asg = ""; if (b.assignee) { const p = profByHandle(b.assignee.replace(/^@/, "")); if (p && tmActive(tm.id, p.user_id)) asg = p.user_id; }
+    if (asg !== k.assignee) { db.prepare("UPDATE team_tasks SET assignee=? WHERE id=?").run(asg, k.id); kind = "task_assign"; if (asg && asg !== me) pushTo(asg, "team", { from: tm.id }); text = (asg ? tmHandle(asg) : "") + "\n" + k.text; }
+  }
+  if (typeof b.text === "string") { const tx = cleanText(b.text, 200).replace(/\n/g, " "); if (tx && tx !== k.text) { if (wordBlocked(tx)) return res.status(400).json({ error: "blocked_content" }); db.prepare("UPDATE team_tasks SET text=? WHERE id=?").run(tx, k.id); if (!kind) { kind = "task_edit"; text = tx; } } }
+  db.prepare("UPDATE team_tasks SET updated=? WHERE id=?").run(now(), k.id);
+  tmBump(tm.id, me, kind, text);
+  res.json({ ok: true });
+});
+S("team_task_del", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm) return res.status(404).json({ error: "not_found" });
+  const k = db.prepare("SELECT id, text, created_by FROM team_tasks WHERE id=? AND team_id=?").get(String(b.tid || ""), tm.id);
+  if (!k || (k.created_by !== me && tm.owner !== me)) return res.status(404).json({ error: "not_found" });
+  db.prepare("DELETE FROM team_tasks WHERE id=?").run(k.id);
+  tmBump(tm.id, me, "task_del", k.text);
+  res.json({ ok: true });
+});
+S("team_note_set", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tm = tmActive(b.id, me);
+  if (!tm) return res.status(404).json({ error: "not_found" });
+  if (!limit("stnote:" + me, 60, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const text = cleanText(b.text, 5000);
+  const cur = db.prepare("SELECT text, rev, by_id, updated FROM team_notes WHERE team_id=?").get(tm.id) || { text: "", rev: 0 };
+  if ((+b.rev || 0) !== cur.rev) return res.status(409).json({ error: "conflict", note: { text: cur.text, rev: cur.rev, by: cur.by_id ? tmHandle(cur.by_id) : "", updated: cur.updated } });
+  if (text && wordBlocked(text)) return res.status(400).json({ error: "blocked_content" });
+  db.prepare("INSERT INTO team_notes(team_id,text,rev,by_id,updated) VALUES(?,?,?,?,?) ON CONFLICT(team_id) DO UPDATE SET text=excluded.text, rev=excluded.rev, by_id=excluded.by_id, updated=excluded.updated").run(tm.id, text, cur.rev + 1, me, now());
+  tmBump(tm.id, me, "note", "");
+  res.json({ ok: true, rev: cur.rev + 1 });
+});
+// Paket 147: mesaj düzenleme (uçtan uca şifreli metin; gönderen, 15 dk içinde, yalnızca ekli olmayan mesajlar)
+const EDIT_MS = 15 * 60e3;
+S("msg_edit", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, kind = b.kind === "g" ? "g" : "d", id = Math.floor(+b.id || 0), text = String(b.text || "");
+  if (!limit("smedit:" + me, 60, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!id) return res.status(404).json({ error: "not_found" });
+  const m = kind === "d" ? db.prepare("SELECT id, from_id, to_id, media, created FROM msgs WHERE id=?").get(id) : db.prepare("SELECT id, from_id, group_id, media, created FROM gmsgs WHERE id=?").get(id);
+  if (!m || m.from_id !== me) return res.status(404).json({ error: "not_found" });
+  if (m.media) return res.status(400).json({ error: "has_media" });
+  if (now() - m.created > EDIT_MS) return res.status(403).json({ error: "edit_expired" });
+  if (!e2eActive(me)) return res.status(409).json({ error: "no_key" });
+  const tEd = now();
+  if (kind === "d") {
+    if (blockedEither(me, m.to_id) || isBanned(m.to_id)) return res.status(404).json({ error: "not_found" });
+    const em = E2E_DM_RE.exec(text); if (!em) return res.status(400).json({ error: "e2e_required" });
+    const mk = e2eActive(me), pk = e2eActive(m.to_id);
+    if (!pk) return res.status(409).json({ error: "peer_no_key" });
+    if (em[1] !== mk.fp || em[2] !== pk.fp) return res.status(409).json({ error: "key_changed" });
+    db.prepare("UPDATE msgs SET text=?, ed=? WHERE id=?").run(text, tEd, id);
+  } else {
+    if (!isMember(m.group_id, me)) return res.status(404).json({ error: "not_found" });
+    const gm = E2E_G_RE.exec(text); if (!gm) return res.status(400).json({ error: "e2e_required" });
+    const curEp = db.prepare("SELECT MAX(epoch) e FROM group_epochs WHERE group_id=?").get(m.group_id).e || 0;
+    if (+gm[1] < 1 || +gm[1] > curEp) return res.status(409).json({ error: "bad_epoch" });
+    db.prepare("UPDATE gmsgs SET text=?, ed=? WHERE id=?").run(text, tEd, id);
+  }
+  res.json({ ok: true, ed: tEd });
+});
 S("react", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, kind = b.kind === "g" ? "g" : "d", id = Math.floor(+b.id || 0), emoji = String(b.emoji || "");
   if (!limit("sreact:" + me, 300, 600e3)) return res.status(429).json({ error: "rate_limited" });
@@ -1146,12 +1344,12 @@ S("gthread", needProf, (req, res) => {
   if (!g || !isMember(gid, me)) return res.status(404).json({ error: "not_found" });
   const after = +(req.body || {}).after || 0;
   expireMsgs();
-  const rows = db.prepare("SELECT x.id, x.from_id, x.text, x.media, x.created, x.exp, f.handle FROM gmsgs x JOIN profiles f ON f.user_id=x.from_id WHERE x.group_id=? AND x.id>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker=? AND b.blocked=x.from_id) ORDER BY x.id DESC LIMIT 60").all(gid, after, me).reverse();
+  const rows = db.prepare("SELECT x.id, x.from_id, x.text, x.media, x.created, x.exp, x.ed, f.handle FROM gmsgs x JOIN profiles f ON f.user_id=x.from_id WHERE x.group_id=? AND (x.id>? OR x.ed>?) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker=? AND b.blocked=x.from_id) ORDER BY x.id DESC LIMIT 60").all(gid, after, +(req.body || {}).eds || 9e15, me).reverse();
   const top = db.prepare("SELECT MAX(id) m FROM gmsgs WHERE group_id=?").get(gid).m || 0;
   db.prepare("UPDATE group_members SET last_read=? WHERE group_id=? AND user_id=?").run(top, gid, me);
   const rm = reactMap("g", rows.map(r => r.id), me), mem = db.prepare("SELECT m.user_id, f.handle FROM group_members m JOIN profiles f ON f.user_id=m.user_id WHERE m.group_id=?").all(gid);
-  res.json({ ttl: ttlOf(ttlG(gid)), name: g.name, owner: g.owner === me, members: mem.map(x => x.handle), typing: mem.filter(x => x.user_id !== me && typing("g:" + gid + ":" + x.user_id)).map(x => x.handle),
-    msgs: rows.map(r => withRe({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, exp: r.exp || 0 }, rm)) });
+  res.json({ now: now(), ttl: ttlOf(ttlG(gid)), name: g.name, owner: g.owner === me, members: mem.map(x => x.handle), typing: mem.filter(x => x.user_id !== me && typing("g:" + gid + ":" + x.user_id)).map(x => x.handle),
+    msgs: rows.map(r => withRe({ id: r.id, handle: r.handle, mine: r.from_id === me, text: r.text, media: mediaUrl(r.media), created: r.created, exp: r.exp || 0, ed: r.ed || 0 }, rm)) });
 });
 S("gsend", needProf, (req, res) => {
   const me = req.user.id, b = req.body || {}, gid = String(b.id || ""), text = String(b.text || ""), media = String(b.media || "");
@@ -1163,6 +1361,7 @@ S("gsend", needProf, (req, res) => {
   const curEp = db.prepare("SELECT MAX(epoch) e FROM group_epochs WHERE group_id=?").get(gid).e || 0;
   if (+gm[1] < 1 || +gm[1] > curEp) return res.status(409).json({ error: "bad_epoch" });
   const r = db.prepare("INSERT INTO gmsgs(group_id,from_id,text,media,created) VALUES(?,?,?,?,?)").run(gid, me, text, media, now());
+  pushGroup(gid, me, { h: handleOfUid(me) });
   db.prepare("UPDATE group_members SET last_read=? WHERE group_id=? AND user_id=?").run(Number(r.lastInsertRowid), gid, me);
   res.json({ ok: true, id: Number(r.lastInsertRowid) });
 });
@@ -3838,6 +4037,95 @@ function canDmTo(from, to) {
   if (db.prepare("SELECT 1 FROM msgs WHERE from_id=? AND to_id=? LIMIT 1").get(to, from)) return true;
   return who === "following" && !!isFollowing(to, from);
 }
+
+// Paket 145: sesli / görüntülü arama (WebRTC sinyalleşmesi bellekte; medya doğrudan cihazlar arasında, DTLS-SRTP ile şifreli)
+db.exec(`CREATE TABLE IF NOT EXISTS call_log(id TEXT PRIMARY KEY, caller TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, callee TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, dur INTEGER NOT NULL DEFAULT 0, seen INTEGER NOT NULL DEFAULT 0)`);
+const CALLS = new Map(), CALL_RING_MS = 45e3, CALL_GONE_MS = 20e3;
+const callFind = uid => { for (const c of CALLS.values()) if ((c.a === uid || c.b === uid) && (c.state === "ring" || c.state === "live")) return c; return null; };
+function callFinish(c, state) {
+  if (c.state !== "ring" && c.state !== "live") return;
+  const was = c.state; c.state = state; c.ended = now();
+  const dur = was === "live" && c.started ? Math.round((c.ended - c.started) / 1000) : 0;
+  const logSt = was === "ring" ? (state === "declined" ? "declined" : state === "ended" ? "cancelled" : "missed") : "done";
+  try { db.prepare("INSERT OR IGNORE INTO call_log(id,caller,callee,kind,state,created,dur,seen) VALUES(?,?,?,?,?,?,?,?)").run(c.id, c.a, c.b, c.kind, logSt, c.created, dur, logSt === "missed" ? 0 : 1); } catch (e) {}
+}
+function callSweep() {
+  const t = now();
+  for (const c of CALLS.values()) {
+    if (c.state === "ring" && t - c.created > CALL_RING_MS) callFinish(c, "timeout");
+    else if (c.state === "live" && (t - c.seenA > CALL_GONE_MS || t - c.seenB > CALL_GONE_MS)) callFinish(c, "ended");
+    if (c.state !== "ring" && c.state !== "live" && t - c.ended > 30e3) CALLS.delete(c.id);
+  }
+}
+setInterval(callSweep, 5000).unref();
+const callPeer = (c, me) => (c.a === me ? c.b : c.a);
+const callProf = uid => db.prepare("SELECT handle, avatar FROM profiles WHERE user_id=?").get(uid) || { handle: "", avatar: "" };
+S("call_cfg", needProf, (req, res) => {
+  const ice = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  const tu = String(process.env.TURN_URL || "").split(",").map(x => x.trim()).filter(Boolean);
+  if (tu.length) ice.push({ urls: tu, username: String(process.env.TURN_USER || ""), credential: String(process.env.TURN_PASS || "") });
+  res.json({ ok: true, ice, turn: tu.length > 0 });
+});
+S("call_start", needProf, (req, res) => {
+  callSweep();
+  const me = req.user.id, b = req.body || {};
+  if (!limit("scall:" + me, 20, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const p = profByHandle(b.handle), kind = b.kind === "v" ? "v" : "a";
+  if (!p || p.user_id === me) return res.status(404).json({ error: "not_found" });
+  if (blockedEither(me, p.user_id) || !canDmTo(me, p.user_id)) return res.status(403).json({ error: "not_allowed" });
+  if (callFind(me)) return res.status(409).json({ error: "busy_me" });
+  if (callFind(p.user_id)) return res.status(409).json({ error: "busy" });
+  const id = crypto.randomBytes(9).toString("hex"), t = now();
+  CALLS.set(id, { id, a: me, b: p.user_id, kind, state: "ring", created: t, seenA: t, seenB: t, qa: [], qb: [] });
+  pushTo(p.user_id, "call", { h: handleOfUid(me), from: me });
+  res.json({ ok: true, id });
+});
+S("call_poll", needProf, (req, res) => {
+  callSweep();
+  const me = req.user.id, b = req.body || {}, t = now();
+  const missed = db.prepare("SELECT id, caller, kind FROM call_log WHERE callee=? AND state='missed' AND seen=0 ORDER BY created DESC LIMIT 5").all(me).map(r => ({ id: r.id, handle: callProf(r.caller).handle, kind: r.kind }));
+  if (missed.length) db.prepare("UPDATE call_log SET seen=1 WHERE callee=? AND state='missed' AND seen=0").run(me);
+  const id = String(b.id || "");
+  if (id) {
+    const c = CALLS.get(id);
+    if (!c || (c.a !== me && c.b !== me)) return res.json({ ok: true, state: "gone", sig: [], missed });
+    const mineA = c.a === me;
+    if (mineA) c.seenA = t; else c.seenB = t;
+    const q = mineA ? c.qa : c.qb, sig = q.splice(0, q.length);
+    return res.json({ ok: true, state: c.state, kind: c.kind, sig, missed });
+  }
+  const c = callFind(me);
+  if (c && c.state === "ring" && c.b === me) { const pr = callProf(c.a); return res.json({ ok: true, incoming: { id: c.id, handle: pr.handle, avatar: pr.avatar, kind: c.kind }, missed }); }
+  res.json({ ok: true, incoming: null, missed });
+});
+S("call_signal", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = CALLS.get(String(b.id || ""));
+  if (!c || (c.a !== me && c.b !== me) || (c.state !== "ring" && c.state !== "live")) return res.status(404).json({ error: "not_found" });
+  if (!limit("scsig:" + me, 600, 60e3)) return res.status(429).json({ error: "rate_limited" });
+  const d = b.data; let js = "";
+  try { js = JSON.stringify(d); } catch (e) {}
+  if (!d || typeof d !== "object" || !["offer", "answer", "ice"].includes(d.k) || js.length > 12000) return res.status(400).json({ error: "bad_data" });
+  const q = c.a === me ? c.qb : c.qa;
+  if (q.length >= 150) return res.status(429).json({ error: "rate_limited" });
+  q.push(d);
+  res.json({ ok: true });
+});
+S("call_answer", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = CALLS.get(String(b.id || ""));
+  if (!c || c.b !== me || c.state !== "ring") return res.status(404).json({ error: "not_found" });
+  if (b.accept) { c.state = "live"; c.started = now(); c.seenA = c.seenB = c.started; } else callFinish(c, "declined");
+  res.json({ ok: true, state: c.state });
+});
+S("call_end", needProf, (req, res) => {
+  const me = req.user.id, c = CALLS.get(String((req.body || {}).id || ""));
+  if (c && (c.a === me || c.b === me)) callFinish(c, "ended");
+  res.json({ ok: true });
+});
+S("call_log", needProf, (req, res) => {
+  const me = req.user.id;
+  const rows = db.prepare("SELECT id, caller, callee, kind, state, created, dur FROM call_log WHERE caller=? OR callee=? ORDER BY created DESC LIMIT 30").all(me, me);
+  res.json({ ok: true, calls: rows.map(r => ({ id: r.id, out: r.caller === me, handle: callProf(r.caller === me ? r.callee : r.caller).handle, kind: r.kind, state: r.state, created: r.created, dur: r.dur })) });
+});
 S("dm_policy_set", needProf, (req, res) => {
   const me = req.user.id, w = (req.body || {}).who;
   if (!DM_WHO.includes(w)) return res.status(400).json({ error: "bad_policy" });
@@ -3929,6 +4217,8 @@ S("lastseen_set", needProf, (req, res) => {
 // Paket 83: kaybolan mesajlar (sohbet başına süre) ve randevu/rezervasyon sistemi
 try { db.exec("ALTER TABLE msgs ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* sütun zaten var */ }
 try { db.exec("ALTER TABLE gmsgs ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* sütun zaten var */ }
+try { db.exec("ALTER TABLE msgs ADD COLUMN ed INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* sütun zaten var */ }
+try { db.exec("ALTER TABLE gmsgs ADD COLUMN ed INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* sütun zaten var */ }
 db.exec(`CREATE TABLE IF NOT EXISTS chat_ttl(ckey TEXT PRIMARY KEY, ttl INTEGER NOT NULL, by_id TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS msgs_exp ON msgs(exp) WHERE exp>0;
 CREATE INDEX IF NOT EXISTS gmsgs_exp ON gmsgs(exp) WHERE exp>0;
@@ -4076,6 +4366,194 @@ S("rv_act", needProf, (req, res) => {
   res.json({ ok: true, status: st });
 });
 // ===== END PACK83 =====
+// ===== BEGIN PACK149 =====
+// Paket 149: anlık bildirimler (Web Push / VAPID, sıfır bağımlılık), ntfy yedeği, sessiz saatler, sunucu hatırlatıcıları.
+// Bildirim metni asla mesaj içeriği taşımaz (mesajlar uçtan uca şifreli); yalnızca "X sana mesaj gönderdi" gibi üst veri gider.
+db.exec(`
+CREATE TABLE IF NOT EXISTS push_cfg(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS push_subs(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, lang TEXT NOT NULL DEFAULT 'tr', fails INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS push_subs_u ON push_subs(user_id);
+CREATE TABLE IF NOT EXISTS push_prefs(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, msgs INTEGER NOT NULL DEFAULT 1, calls INTEGER NOT NULL DEFAULT 1, notifs INTEGER NOT NULL DEFAULT 1, team INTEGER NOT NULL DEFAULT 1, rem INTEGER NOT NULL DEFAULT 1, qon INTEGER NOT NULL DEFAULT 0, qs INTEGER NOT NULL DEFAULT 1320, qe INTEGER NOT NULL DEFAULT 480, qcall INTEGER NOT NULL DEFAULT 1, tzo INTEGER NOT NULL DEFAULT 0, lang TEXT NOT NULL DEFAULT 'tr', ntfy TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS reminders(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, at INTEGER NOT NULL, created INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS reminders_at ON reminders(sent, at);
+`);
+const PUSH_LANGS = ["tr", "en", "de", "es", "fr", "pt", "ru", "ar", "az", "id", "ja"];
+const PUSH_T = {
+  msg: ["{h} sana mesaj gönderdi", "{h} sent you a message", "{h} hat dir eine Nachricht gesendet", "{h} te envió un mensaje", "{h} vous a envoyé un message", "{h} enviou uma mensagem", "{h} отправил(а) вам сообщение", "أرسل {h} رسالة إليك", "{h} sənə mesaj göndərdi", "{h} mengirim pesan kepadamu", "{h}さんからメッセージが届きました"],
+  gmsg: ["{h} grupta mesaj yazdı", "{h} wrote in a group", "{h} hat in einer Gruppe geschrieben", "{h} escribió en un grupo", "{h} a écrit dans un groupe", "{h} escreveu em um grupo", "{h} написал(а) в группе", "كتب {h} في مجموعة", "{h} qrupda yazdı", "{h} menulis di grup", "{h}さんがグループに投稿しました"],
+  call: ["{h} seni arıyor", "{h} is calling you", "{h} ruft dich an", "{h} te está llamando", "{h} vous appelle", "{h} está ligando para você", "{h} звонит вам", "{h} يتصل بك", "{h} sənə zəng edir", "{h} meneleponmu", "{h}さんから着信があります"],
+  notif: ["Yeni bir bildirimin var", "You have a new notification", "Du hast eine neue Benachrichtigung", "Tienes una notificación nueva", "Vous avez une nouvelle notification", "Você tem uma nova notificação", "У вас новое уведомление", "لديك إشعار جديد", "Yeni bildirişin var", "Kamu punya notifikasi baru", "新しい通知があります"],
+  team: ["Ekip alanında sana görev atandı", "A team task was assigned to you", "Dir wurde eine Teamaufgabe zugewiesen", "Te asignaron una tarea del equipo", "Une tâche d'équipe vous a été attribuée", "Uma tarefa da equipe foi atribuída a você", "Вам назначена задача команды", "تم تعيين مهمة فريق لك", "Sənə komanda tapşırığı verildi", "Tugas tim diberikan kepadamu", "チームのタスクが割り当てられました"],
+  test: ["Test bildirimi: her şey çalışıyor", "Test notification: everything works", "Testbenachrichtigung: alles funktioniert", "Notificación de prueba: todo funciona", "Notification de test : tout fonctionne", "Notificação de teste: tudo funciona", "Тестовое уведомление: всё работает", "إشعار تجريبي: كل شيء يعمل", "Sınaq bildirişi: hər şey işləyir", "Notifikasi uji: semuanya berfungsi", "テスト通知:正常に動作しています"],
+};
+const b64u = b => Buffer.from(b).toString("base64url");
+const fromB64u = s => Buffer.from(String(s || ""), "base64url");
+const PUSH_NTFY = (process.env.NTFY_URL || "https://ntfy.sh").replace(/\/$/, "");
+const PUSH_SUB_MAX = 5;
+let VAPID = null;
+function vapidKeys() {
+  if (VAPID) return VAPID;
+  let pub = process.env.VAPID_PUBLIC || "", prv = process.env.VAPID_PRIVATE || "";
+  if (!pub || !prv) {
+    const a = db.prepare("SELECT v FROM push_cfg WHERE k='vapid_pub'").get(), c = db.prepare("SELECT v FROM push_cfg WHERE k='vapid_prv'").get();
+    if (a && c) { pub = a.v; prv = c.v; }
+    else {
+      const kp = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" }), j = kp.privateKey.export({ format: "jwk" });
+      pub = b64u(Buffer.concat([Buffer.from([4]), fromB64u(j.x), fromB64u(j.y)])); prv = j.d;
+      db.prepare("INSERT OR REPLACE INTO push_cfg(k,v) VALUES('vapid_pub',?)").run(pub); db.prepare("INSERT OR REPLACE INTO push_cfg(k,v) VALUES('vapid_prv',?)").run(prv);
+    }
+  }
+  const raw = fromB64u(pub);
+  const key = crypto.createPrivateKey({ key: { kty: "EC", crv: "P-256", d: prv, x: b64u(raw.subarray(1, 33)), y: b64u(raw.subarray(33, 65)) }, format: "jwk" });
+  VAPID = { pub, key };
+  return VAPID;
+}
+function vapidAuth(endpoint) {
+  const v = vapidKeys(), aud = new URL(endpoint).origin;
+  const head = b64u(JSON.stringify({ typ: "JWT", alg: "ES256" })), body = b64u(JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: process.env.VAPID_SUB || "mailto:destek@pusula.app" }));
+  const sig = crypto.sign("sha256", Buffer.from(head + "." + body), { key: v.key, dsaEncoding: "ieee-p1363" });
+  return "vapid t=" + head + "." + body + "." + b64u(sig) + ", k=" + v.pub;
+}
+// RFC 8291 (aes128gcm) şifreleme; test için sabit anahtar/tuz verilebilir
+function pushEncrypt(payload, p256dh, authSecret, fixed) {
+  const uaPub = fromB64u(p256dh), auth = fromB64u(authSecret);
+  if (uaPub.length !== 65 || uaPub[0] !== 4 || auth.length !== 16) throw new Error("bad_keys");
+  const ecdh = crypto.createECDH("prime256v1"); if (fixed && fixed.priv) ecdh.setPrivateKey(fixed.priv); else ecdh.generateKeys();
+  const asPub = ecdh.getPublicKey(), secret = ecdh.computeSecret(uaPub), salt = (fixed && fixed.salt) || crypto.randomBytes(16);
+  const prk = Buffer.from(crypto.hkdfSync("sha256", secret, auth, Buffer.concat([Buffer.from("WebPush: info\0"), uaPub, asPub]), 32));
+  const cek = Buffer.from(crypto.hkdfSync("sha256", prk, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16)), nonce = Buffer.from(crypto.hkdfSync("sha256", prk, salt, Buffer.from("Content-Encoding: nonce\0"), 12));
+  const c = crypto.createCipheriv("aes-128-gcm", cek, nonce), ct = Buffer.concat([c.update(Buffer.concat([Buffer.from(payload), Buffer.from([2])])), c.final(), c.getAuthTag()]);
+  const rs = Buffer.alloc(4); rs.writeUInt32BE(4096);
+  return Buffer.concat([salt, rs, Buffer.from([65]), asPub, ct]);
+}
+const PUSH_HOST_OK = h => /(^|\.)(googleapis\.com|push\.services\.mozilla\.com|notify\.windows\.com|push\.apple\.com|web\.push\.apple\.com)$/.test(h) || (process.env.PUSH_ALLOW_LOCAL === "1" && /^(localhost|127\.0\.0\.1)$/.test(h));
+function pushEndpointOk(ep) {
+  try { const u = new URL(ep); return (u.protocol === "https:" || (process.env.PUSH_ALLOW_LOCAL === "1" && u.protocol === "http:")) && ep.length <= 600 && PUSH_HOST_OK(u.hostname); } catch (e) { return false; }
+}
+async function webPushSend(sub, payload, opt) {
+  const body = pushEncrypt(JSON.stringify(payload), sub.p256dh, sub.auth);
+  const r = await fetch(sub.endpoint, { method: "POST", headers: { Authorization: vapidAuth(sub.endpoint), "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", TTL: String((opt && opt.ttl) || 3600), Urgency: (opt && opt.urgency) || "normal" }, body, signal: AbortSignal.timeout(8000) });
+  return r.status;
+}
+const pushPrefs = uid => db.prepare("SELECT * FROM push_prefs WHERE user_id=?").get(uid) || { user_id: uid, msgs: 1, calls: 1, notifs: 1, team: 1, rem: 1, qon: 0, qs: 1320, qe: 480, qcall: 1, tzo: 0, lang: "tr", ntfy: "" };
+function pushQuiet(p, kind) {
+  if (!p.qon || kind === "rem") return false;
+  if (kind === "call" && p.qcall) return false;
+  const m = (((Math.floor(now() / 60000) + p.tzo) % 1440) + 1440) % 1440;
+  return p.qs <= p.qe ? (m >= p.qs && m < p.qe) : (m >= p.qs || m < p.qe);
+}
+const PUSH_THROTTLE = new Map();
+const PUSH_CAT = { msg: "msgs", gmsg: "msgs", call: "calls", notif: "notifs", team: "team", rem: "rem", test: "" };
+const handleOfUid = uid => { const r = db.prepare("SELECT handle FROM profiles WHERE user_id=?").get(uid); return r ? "@" + r.handle : ""; };
+// Bir kullanıcıya (tüm cihazlarına + ntfy) bildirim gönderir; asla hata fırlatmaz, asla beklenmez.
+function pushTo(uid, kind, v) {
+  try {
+    if (!uid) return;
+    const p = pushPrefs(uid), cat = PUSH_CAT[kind];
+    if (cat && !p[cat]) return;
+    if (pushQuiet(p, kind)) return;
+    const subs = db.prepare("SELECT * FROM push_subs WHERE user_id=?").all(uid);
+    if (!subs.length && !p.ntfy) return;
+    if (kind !== "test" && kind !== "rem") {
+      const tk = kind + ":" + uid + ":" + ((v && v.from) || ""), last = PUSH_THROTTLE.get(tk) || 0, t = now();
+      if (t - last < (kind === "call" ? 5000 : kind === "notif" ? 20000 : 30000)) return;
+      PUSH_THROTTLE.set(tk, t); if (PUSH_THROTTLE.size > 5000) { for (const [k, x] of PUSH_THROTTLE) if (x < t - 60000) PUSH_THROTTLE.delete(k); }
+    }
+    const high = kind === "call";
+    for (const s of subs) {
+      const li = Math.max(0, PUSH_LANGS.indexOf(s.lang)), txt = kind === "rem" ? String((v && v.text) || "") : (PUSH_T[kind] || PUSH_T.notif)[li].replace("{h}", (v && v.h) || "");
+      const payload = { t: kind === "rem" ? "⏰ Pusula" : "Pusula Medya", b: txt, k: kind, tag: kind + (v && v.from ? ":" + v.from : ""), u: (v && v.u) || "" };
+      webPushSend(s, payload, { ttl: high ? 30 : kind === "rem" ? 86400 : 3600, urgency: high ? "high" : "normal" }).then(st => {
+        if (st === 404 || st === 410) db.prepare("DELETE FROM push_subs WHERE id=?").run(s.id);
+        else if (st >= 400) { db.prepare("UPDATE push_subs SET fails=fails+1 WHERE id=?").run(s.id); db.prepare("DELETE FROM push_subs WHERE id=? AND fails>=8").run(s.id); }
+        else db.prepare("UPDATE push_subs SET fails=0 WHERE id=? AND fails>0").run(s.id);
+      }).catch(() => { db.prepare("UPDATE push_subs SET fails=fails+1 WHERE id=?").run(s.id); db.prepare("DELETE FROM push_subs WHERE id=? AND fails>=8").run(s.id); });
+    }
+    if (p.ntfy && /^pusula-[a-z0-9]{12,24}$/.test(p.ntfy)) {
+      const li = Math.max(0, PUSH_LANGS.indexOf(p.lang)), txt = kind === "rem" ? String((v && v.text) || "") : (PUSH_T[kind] || PUSH_T.notif)[li].replace("{h}", (v && v.h) || "");
+      fetch(PUSH_NTFY + "/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ topic: p.ntfy, title: kind === "rem" ? "⏰ Pusula" : "Pusula Medya", message: txt, priority: high ? 5 : 3, tags: [kind === "call" ? "telephone_receiver" : kind === "rem" ? "alarm_clock" : "bell"] }), signal: AbortSignal.timeout(8000) }).catch(() => {});
+    }
+  } catch (e) { /* bildirim hatası asıl işi bozmasın */ }
+}
+function pushGroup(gid, from, v) { try { for (const m of db.prepare("SELECT user_id FROM group_members WHERE group_id=? AND user_id<>?").all(gid, from)) if (!blockedEither(m.user_id, from)) pushTo(m.user_id, "gmsg", { ...v, from: gid }); } catch (e) { /* yoksay */ } }
+
+const pushOut = p => ({ msgs: !!p.msgs, calls: !!p.calls, notifs: !!p.notifs, team: !!p.team, rem: !!p.rem, qon: !!p.qon, qs: p.qs, qe: p.qe, qcall: !!p.qcall, ntfy: p.ntfy || "" });
+S("push_info", needProf, (req, res) => {
+  const me = req.user.id, p = pushPrefs(me);
+  res.json({ ok: true, key: vapidKeys().pub, devices: db.prepare("SELECT COUNT(*) n FROM push_subs WHERE user_id=?").get(me).n, prefs: pushOut(p) });
+});
+S("push_sub", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, k = b.keys || {}, ep = String(b.endpoint || "");
+  if (!limit("psub:" + me, 30, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!pushEndpointOk(ep)) return res.status(400).json({ error: "bad_endpoint" });
+  try { if (fromB64u(k.p256dh).length !== 65 || fromB64u(k.auth).length !== 16) throw 0; } catch (e) { return res.status(400).json({ error: "bad_keys" }); }
+  const lang = PUSH_LANGS.includes(b.lang) ? b.lang : "tr", ex = db.prepare("SELECT id, user_id FROM push_subs WHERE endpoint=?").get(ep);
+  if (ex) db.prepare("UPDATE push_subs SET user_id=?, p256dh=?, auth=?, lang=?, fails=0 WHERE id=?").run(me, String(k.p256dh), String(k.auth), lang, ex.id);
+  else {
+    if (db.prepare("SELECT COUNT(*) n FROM push_subs WHERE user_id=?").get(me).n >= PUSH_SUB_MAX) db.prepare("DELETE FROM push_subs WHERE id=(SELECT id FROM push_subs WHERE user_id=? ORDER BY created LIMIT 1)").run(me);
+    db.prepare("INSERT INTO push_subs(id,user_id,endpoint,p256dh,auth,lang,created) VALUES(?,?,?,?,?,?,?)").run("s" + rnd(8), me, ep, String(k.p256dh), String(k.auth), lang, now());
+  }
+  const pr = pushPrefs(me); db.prepare("INSERT INTO push_prefs(user_id,lang) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET lang=excluded.lang").run(me, lang);
+  res.json({ ok: true, devices: db.prepare("SELECT COUNT(*) n FROM push_subs WHERE user_id=?").get(me).n });
+});
+S("push_unsub", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (b.all) db.prepare("DELETE FROM push_subs WHERE user_id=?").run(me); else db.prepare("DELETE FROM push_subs WHERE user_id=? AND endpoint=?").run(me, String(b.endpoint || ""));
+  res.json({ ok: true, devices: db.prepare("SELECT COUNT(*) n FROM push_subs WHERE user_id=?").get(me).n });
+});
+S("push_prefs", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {};
+  if (!limit("ppref:" + me, 120, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  db.prepare("INSERT OR IGNORE INTO push_prefs(user_id) VALUES(?)").run(me);
+  for (const f of ["msgs", "calls", "notifs", "team", "rem", "qon", "qcall"]) if (b[f] !== undefined) db.prepare(`UPDATE push_prefs SET ${f}=? WHERE user_id=?`).run(b[f] ? 1 : 0, me);
+  for (const f of ["qs", "qe"]) if (b[f] !== undefined) { const n = Math.round(+b[f]); if (!(n >= 0 && n < 1440)) return res.status(400).json({ error: "bad_time" }); db.prepare(`UPDATE push_prefs SET ${f}=? WHERE user_id=?`).run(n, me); }
+  if (b.tzo !== undefined) { const n = Math.round(+b.tzo); if (n >= -840 && n <= 840) db.prepare("UPDATE push_prefs SET tzo=? WHERE user_id=?").run(n, me); }
+  if (PUSH_LANGS.includes(b.lang)) db.prepare("UPDATE push_prefs SET lang=? WHERE user_id=?").run(b.lang, me);
+  if (b.ntfy === true) { const c = pushPrefs(me); if (!c.ntfy) db.prepare("UPDATE push_prefs SET ntfy=? WHERE user_id=?").run("pusula-" + crypto.randomBytes(10).toString("hex"), me); }
+  else if (b.ntfy === false) db.prepare("UPDATE push_prefs SET ntfy='' WHERE user_id=?").run(me);
+  else if (b.ntfy === "new") db.prepare("UPDATE push_prefs SET ntfy=? WHERE user_id=?").run("pusula-" + crypto.randomBytes(10).toString("hex"), me);
+  res.json({ ok: true, prefs: pushOut(pushPrefs(me)) });
+});
+S("push_test", needProf, (req, res) => {
+  const me = req.user.id;
+  if (!limit("ptest:" + me, 6, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  const p = pushPrefs(me), n = db.prepare("SELECT COUNT(*) n FROM push_subs WHERE user_id=?").get(me).n;
+  if (!n && !p.ntfy) return res.status(409).json({ error: "no_channel" });
+  pushTo(me, "test", {});
+  res.json({ ok: true, channels: n + (p.ntfy ? 1 : 0) });
+});
+// Sunucu hatırlatıcıları: uygulama kapalıyken de bildirim olarak gelir
+const PREM_MAX = 50;
+S("rem_add", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, text = cleanText(b.text, 120).replace(/\n/g, " "), at = Math.round(+b.at), t = now();
+  if (!limit("remadd:" + me, 60, 600e3)) return res.status(429).json({ error: "rate_limited" });
+  if (!text) return res.status(400).json({ error: "empty" });
+  if (wordBlocked(text)) return res.status(400).json({ error: "blocked_content" });
+  if (!(at > t - 60000) || at > t + 366 * 864e5) return res.status(400).json({ error: "bad_time" });
+  if (db.prepare("SELECT COUNT(*) n FROM reminders WHERE user_id=? AND sent=0").get(me).n >= PREM_MAX) return res.status(409).json({ error: "limit" });
+  const id = "r" + rnd(8);
+  db.prepare("INSERT INTO reminders(id,user_id,text,at,created) VALUES(?,?,?,?,?)").run(id, me, text, Math.max(at, t + 1000), t);
+  res.json({ ok: true, id });
+});
+S("rem_list", needProf, (req, res) => {
+  const me = req.user.id;
+  res.json({ ok: true, items: db.prepare("SELECT id, text, at, sent FROM reminders WHERE user_id=? AND (sent=0 OR at>?) ORDER BY sent, at LIMIT 60").all(me, now() - 2 * 864e5).map(r => ({ id: r.id, text: r.text, at: r.at, done: !!r.sent })) });
+});
+S("rem_del", needProf, (req, res) => {
+  db.prepare("DELETE FROM reminders WHERE id=? AND user_id=?").run(String((req.body || {}).id || ""), req.user.id);
+  res.json({ ok: true });
+});
+function remTick() {
+  const t = now();
+  for (const r of db.prepare("SELECT id, user_id, text FROM reminders WHERE sent=0 AND at<=? ORDER BY at LIMIT 100").all(t)) {
+    db.prepare("UPDATE reminders SET sent=1 WHERE id=?").run(r.id);
+    try { db.prepare("INSERT INTO notifs(user_id,actor,type,post_id,text,created) VALUES(?,?,?,?,?,?)").run(r.user_id, r.user_id, "reminder", "", r.text, t); } catch (e) { /* yoksay */ }
+    pushTo(r.user_id, "rem", { text: r.text });
+  }
+  db.prepare("DELETE FROM reminders WHERE sent=1 AND at<?").run(t - 7 * 864e5);
+}
+setInterval(remTick, 15000).unref();
+// ===== END PACK149 =====
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);
