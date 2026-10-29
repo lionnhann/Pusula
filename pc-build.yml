@@ -1,7 +1,5 @@
 name: Pusula bilgisayar uygulamasi
 
-# Actions sekmesinden "Pusula bilgisayar uygulamasi" -> "Run workflow" ile calistirilir.
-# Bitince Releases sayfasinda "pusula-pc" surumune Windows / Mac / Linux kurulum dosyalari eklenir.
 on:
   workflow_dispatch:
 
