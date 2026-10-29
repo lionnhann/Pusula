@@ -60,3 +60,4 @@ jobs:
           body: "Pusula'yi bilgisayarina kur: Windows (Kurulum veya Tasinabilir), Mac (Apple Silicon: arm64, Intel: x64), Linux (AppImage veya deb)."
           make_latest: "true"
           files: dosyalar/*
+.github/workflows/pc-build.yml
