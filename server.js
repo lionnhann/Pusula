@@ -5290,6 +5290,25 @@ S("my_reports", needProf, (req, res) => {
   res.json({ reports: rows.map(r => ({ kind: r.kind, reason: String(r.reason || "").slice(0, 100), created: r.created })) });
 });
 // ===== END PACK163 =====
+// ===== BEGIN PACK165 =====
+// Paket 165: üretici büyüme panosu (yalnızca kendi verisi; salt okunur).
+S("growth", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, tz = Math.max(-840, Math.min(840, Math.round(+b.tz || 0))), t = now(), D = 864e5;
+  const dk = ts => Math.floor((ts + tz * 6e4) / D), today = dk(t);
+  const rows = db.prepare("SELECT p.created c, (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id AND l.user_id<>p.user_id) lk FROM posts p WHERE p.user_id=? AND p.archived=0 AND p.hidden=0 AND (p.capsule=0 OR p.capsule<=?) ORDER BY p.created DESC LIMIT 3000").all(me, t);
+  const perDay = new Map(); for (const r of rows) { const k = dk(r.c); perDay.set(k, (perDay.get(k) || 0) + 1); }
+  let streak = 0, k = perDay.has(today) ? today : today - 1; while (perDay.has(k) && streak < 4000) { streak++; k--; }
+  let best = 0, run = 0, prev = null; for (const d of [...perDay.keys()].sort((x, y) => x - y)) { run = prev !== null && d === prev + 1 ? run + 1 : 1; prev = d; if (run > best) best = run; }
+  const dow = new Date(t + tz * 6e4).getUTCDay(), wkStart = today - ((dow + 6) % 7);
+  let wk = 0; for (const [d, n] of perDay) if (d >= wkStart && d <= today) wk += n;
+  const days = []; for (let i = 13; i >= 0; i--) days.push(perDay.get(today - i) || 0);
+  const hr = new Array(24).fill(0), hn = new Array(24).fill(0);
+  for (const r of rows) { const h = new Date(r.c + tz * 6e4).getUTCHours(); hr[h] += r.lk; hn[h]++; }
+  let bestHour = null, bv = -1; if (rows.length >= 5) for (let h = 0; h < 24; h++) if (hn[h] >= 2 && hr[h] / hn[h] > bv) { bv = hr[h] / hn[h]; bestHour = h; }
+  const fol = d => db.prepare("SELECT COUNT(*) n FROM follows WHERE followee=? AND created>?").get(me, t - d * D).n;
+  res.json({ ok: true, week: wk, weekStart: wkStart, streak, best, days, total: rows.length, fol7: fol(7), fol30: fol(30), bestHour, activeToday: perDay.has(today) });
+});
+// ===== END PACK165 =====
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);
@@ -5300,3 +5319,4 @@ if (require.main === module) {
 }
 server.requestTimeout = 20 * 60e3; // büyük video yüklemeleri için
 module.exports = { server, db, sigV4Presign, digestRun, playSyncAll, capsuleTick, expireTick };
+
