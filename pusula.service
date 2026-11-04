@@ -1,0 +1,15 @@
+# /etc/systemd/system/pusula.service  (kur-vps.sh bunu kendisi yazar; elle kurarsan YOL'u düzelt)
+[Unit]
+Description=Pusula sunucusu
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/pusula
+EnvironmentFile=/opt/pusula/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+User=pusula
+
+[Install]
+WantedBy=multi-user.target

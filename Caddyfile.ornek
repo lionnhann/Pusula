@@ -1,0 +1,8 @@
+# /etc/caddy/Caddyfile — HTTPS sertifikasını Caddy kendisi alır ve yeniler.
+pusulakisiselasistan.duckdns.org {
+	encode gzip
+	request_body {
+		max_size 60MB
+	}
+	reverse_proxy 127.0.0.1:3000
+}
