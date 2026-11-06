@@ -94,6 +94,25 @@ mock.listen(0, () => {
       r = await up(B, "application/octet-stream", 2000); r = await call("/api/social/gsend", { id: gid, media: r.key, text: E.genv(1) }, B); ok(r.s === 200, "group voice");
       r = await call("/api/social/gadd", { id: gid, handle: "deniz" }, B); ok(r.s === 404, "only owner adds");
       r = await call("/api/social/gadd", { id: gid, handle: "deniz" }, A); ok(r.s === 200, "owner adds member");
+      // --- Paket 199: grup yönetimi
+      r = await call("/api/social/gkick", { id: gid, handle: "deniz" }, B); ok(r.s === 404, "only owner kicks");
+      r = await call("/api/social/gkick", { id: gid, handle: "ali" }, A); ok(r.s === 404, "owner cannot kick self");
+      r = await call("/api/social/gkick", { id: gid, handle: "yok_yok" }, A); ok(r.s === 404, "kick unknown");
+      r = await call("/api/social/grename", { id: gid, name: "Hack" }, B); ok(r.s === 404, "only owner renames");
+      r = await call("/api/social/grename", { id: gid, name: "  " }, A); ok(r.s === 400, "rename needs name");
+      r = await call("/api/social/grename", { id: gid, name: "Yeni ad" }, A); ok(r.s === 200 && r.name === "Yeni ad", "owner renames");
+      r = await call("/api/social/gthread", { id: gid }, B); ok(r.name === "Yeni ad", "new name visible");
+      r = await call("/api/social/gowner", { id: gid, handle: "bora" }, B); ok(r.s === 404, "only owner transfers");
+      r = await call("/api/social/gowner", { id: gid, handle: "ali" }, A); ok(r.s === 404, "cannot transfer to self");
+      r = await call("/api/social/gowner", { id: gid, handle: "bora" }, A); ok(r.s === 200, "owner transfers");
+      r = await call("/api/social/gadd", { id: gid, handle: "deniz" }, A); ok(r.s === 404, "old owner cannot add");
+      r = await call("/api/social/gowner", { id: gid, handle: "ali" }, B); ok(r.s === 200, "transfer back");
+      await E.gkeys(A, gid, [{ tok: D, handle: "deniz" }]);
+      r = await call("/api/social/gkick", { id: gid, handle: "deniz" }, A); ok(r.s === 200, "owner kicks member");
+      r = await call("/api/social/gthread", { id: gid }, D); ok(r.s === 404, "kicked member loses access");
+      r = await call("/api/social/gsend", { id: gid, text: "x" }, D); ok(r.s === 404, "kicked member cannot send");
+      r = await call("/api/social/gkeys", { id: gid }, A); ok(r.rotate === true, "kick flags key rotation");
+      r = await call("/api/social/gadd", { id: gid, handle: "deniz" }, A); ok(r.s === 200, "re-add after kick");
       r = await call("/api/social/gthread", { id: gid }, D); ok(r.s === 200 && r.members.length === 4, "added member reads");
       r = await call("/api/social/me", {}, C); ok(r.unread >= 1, "me.unread includes group messages");
       r = await call("/api/social/gleave", { id: gid }, A); ok(r.s === 200, "owner leaves");
