@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><radialGradient id="bg" cx=".5" cy=".38" r=".85"><stop offset="0" stop-color="#12294a"/><stop offset="1" stop-color="#070c15"/></radialGradient><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8be0ff"/><stop offset="1" stop-color="#2f9fd6"/></linearGradient><radialGradient id="gl" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#56c8f5" stop-opacity=".28"/><stop offset="1" stop-color="#56c8f5" stop-opacity="0"/></radialGradient></defs><rect width="512" height="512" rx="112" fill="url(#bg)"/><g transform="translate(256,256)"><circle r="206" fill="none" stroke="#56c8f5" stroke-width="22"/><path d="M0 -232 L34 -170 L-34 -170Z" fill="#f2b84b"/><g transform="translate(0,16) scale(2.4)"><g transform="translate(-60,-62)">
+<rect x="8" y="54" width="10" height="22" rx="5" fill="#56c8f5"/><rect x="102" y="54" width="10" height="22" rx="5" fill="#56c8f5"/>
+<ellipse cx="60" cy="60" rx="41" ry="38" fill="#f0c8a4" stroke="#c99a74" stroke-width="1.5"/>
+<path d="M17 56 C13 22 36 12 60 12 C84 12 107 22 103 56 C98 40 92 32 82 30 C70 38 44 38 36 28 C26 34 20 44 17 56 Z" fill="#2b2118"/>
+<path d="M92 34 L98 50" stroke="#56c8f5" stroke-width="1.8" fill="none"/><circle cx="98" cy="52" r="1.8" fill="#56c8f5"/>
+<rect x="31" y="43" width="22" height="3.6" rx="1.8" fill="#3a2b20"/><rect x="67" y="43" width="22" height="3.6" rx="1.8" fill="#3a2b20"/>
+<ellipse cx="42" cy="58" rx="9.5" ry="7.5" fill="#fff"/><ellipse cx="78" cy="58" rx="9.5" ry="7.5" fill="#fff"/>
+<ellipse cx="42" cy="58" rx="5.2" ry="6.2" fill="#56c8f5"/><ellipse cx="78" cy="58" rx="5.2" ry="6.2" fill="#56c8f5"/>
+<circle cx="42" cy="58" r="2.3" fill="#07121c"/><circle cx="78" cy="58" r="2.3" fill="#07121c"/><circle cx="40.5" cy="56" r="1.1" fill="#fff"/><circle cx="76.5" cy="56" r="1.1" fill="#fff"/>
+<path d="M60 62 C58 70 56 74 59 76 L63 76" fill="none" stroke="#b98560" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="30" cy="74" r="5.5" fill="#e58f86" opacity=".4"/><circle cx="90" cy="74" r="5.5" fill="#e58f86" opacity=".4"/>
+<path d="M50 83 Q60 90 70 83 Q60 86.5 50 83Z" fill="#8f3d3d" stroke="#8f3d3d" stroke-width="2" stroke-linejoin="round"/></g></g></g></svg>
