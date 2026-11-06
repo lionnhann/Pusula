@@ -5564,6 +5564,27 @@ S("gowner", needProf, (req, res) => {
 });
 // ===== END PACK199 =====
 
+// ===== BEGIN PACK201 =====
+// Topluluk: yasaklıları listele ve yasağı kaldır (yönetici/kurucu)
+S("c_bans", needProf, (req, res) => {
+  const me = req.user.id, c = cByHandle((req.body || {}).handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (!cModOk(c, me)) return res.status(403).json({ error: "forbidden" });
+  const rows = db.prepare("SELECT f.handle FROM community_bans b JOIN profiles f ON f.user_id=b.user_id WHERE b.cid=? ORDER BY f.handle LIMIT 100").all(c.id);
+  res.json({ bans: rows.map(r => r.handle) });
+});
+S("c_unban", needProf, (req, res) => {
+  const me = req.user.id, b = req.body || {}, c = cByHandle(b.handle); if (!c) return res.status(404).json({ error: "not_found" });
+  if (!cModOk(c, me)) return res.status(403).json({ error: "forbidden" });
+  if (!limit("cunban:" + me, 60, 3600e3)) return res.status(429).json({ error: "rate_limited" });
+  const t = profByHandle(String(b.user || "").replace(/^@/, ""));
+  if (!t) return res.status(404).json({ error: "no_user" });
+  const r = db.prepare("DELETE FROM community_bans WHERE cid=? AND user_id=?").run(c.id, t.user_id);
+  if (!r.changes) return res.status(404).json({ error: "not_banned" });
+  clog(c.id, me, "unban", t.user_id);
+  res.json({ ok: true });
+});
+// ===== END PACK201 =====
+
 if (require.main === module) {
   if (BK_ON) {
     setTimeout(() => bkRun(true), 4000);

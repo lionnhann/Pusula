@@ -61,6 +61,16 @@ mock.listen(0, () => {
       dels.length = 0; r = await so("c_kick", { handle: "girisimciler", user: "can_x", ban: true, purge: true }, B); await new Promise(z => setTimeout(z, 150)); ok(r.s === 200 && dels.includes("/pusula-media/" + up.key), "ban + purge deletes posts and media");
       r = await so("c_join", { handle: "girisimciler", on: true }, C); ok(r.s === 403 && r.error === "banned_here", "banned user cannot rejoin");
       r = await so("post", { kind: "text", text: "tekrar", community: "girisimciler" }, C); ok(r.s === 403, "banned cannot post");
+      // --- Paket 201: yasaklı listesi ve yasağı kaldırma
+      r = await so("c_bans", { handle: "girisimciler" }, C); ok(r.s === 403, "non-mod cannot list bans");
+      r = await so("c_bans", { handle: "girisimciler" }, B); ok(r.s === 200 && r.bans.length === 1 && r.bans[0] === "can_x", "mod lists bans");
+      r = await so("c_unban", { handle: "girisimciler", user: "can_x" }, C); ok(r.s === 403, "banned cannot unban self");
+      r = await so("c_unban", { handle: "girisimciler", user: "ali" }, B); ok(r.s === 404, "unban of non-banned refused");
+      r = await so("c_unban", { handle: "girisimciler", user: "yok_yok" }, B); ok(r.s === 404, "unban unknown user");
+      r = await so("c_unban", { handle: "girisimciler", user: "can_x" }, B); ok(r.s === 200, "mod unbans");
+      r = await so("c_bans", { handle: "girisimciler" }, B); ok(r.s === 200 && r.bans.length === 0, "ban list empty");
+      r = await so("c_join", { handle: "girisimciler", on: true }, C); ok(r.s === 200, "unbanned user can rejoin");
+      r = await so("c_kick", { handle: "girisimciler", user: "can_x", ban: true }, B); ok(r.s === 200, "ban again to keep later checks");
       // bildirme + yönetici paneli
       r = await so("report", { kind: "community", target: "girisimciler", reason: "test" }, D); ok(r.s === 200, "report community");
       const adm = (p, b) => call(p, b, null, { "x-admin-token": "adm-test-token-123456" });
